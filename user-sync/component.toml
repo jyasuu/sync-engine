@@ -1,0 +1,17 @@
+# user-sync/component.toml
+#
+# Assembles named components from registered primitives.
+# Change this file to rewire how a source/transform/sink is built.
+# No recompile needed — just restart.
+
+[source.user-api]
+chunker = "date-window"
+auth    = "oauth2"
+fetcher = "http-json"
+
+[transform.user]
+mapper = "user-fields"
+
+[sink.postgres]
+writer    = "pg-upsert"
+post_hook = "raw-sql"

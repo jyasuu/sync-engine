@@ -1,0 +1,222 @@
+[record.ApiUser]
+serde_rename = "snake_case"
+
+[record.ApiUser.fetcher]
+envelope_field = "data"
+
+[[record.ApiUser.fields]]
+name = "pccuid"
+type = "i64"
+
+[[record.ApiUser.fields]]
+name = "sso_acct"
+type = "String"
+
+[[record.ApiUser.fields]]
+name = "fact_no"
+type = "Option<String>"
+
+[[record.ApiUser.fields]]
+name = "local_fact_no"
+type = "Option<String>"
+
+[[record.ApiUser.fields]]
+name = "chinese_nm"
+type = "Option<String>"
+
+[[record.ApiUser.fields]]
+name = "local_pnl_nm"
+type = "Option<String>"
+
+[[record.ApiUser.fields]]
+name = "english_nm"
+type = "Option<String>"
+
+[[record.ApiUser.fields]]
+name = "contact_mail"
+type = "Option<String>"
+
+[[record.ApiUser.fields]]
+name = "sex"
+type = "Option<String>"
+
+[[record.ApiUser.fields]]
+name = "lo_posi_nm"
+type = "Option<String>"
+
+[[record.ApiUser.fields]]
+name = "disabled"
+type = "bool"
+
+[[record.ApiUser.fields]]
+name = "disabled_date"
+type = "Option<i64>"
+
+[[record.ApiUser.fields]]
+name = "update_date"
+type = "i64"
+
+[[record.ApiUser.fields]]
+name = "lo_dept_nm"
+type = "Option<String>"
+
+[[record.ApiUser.fields]]
+name = "tel"
+type = "Option<String>"
+
+[[record.ApiUser.fields]]
+name = "leave_mk"
+type = "Option<String>"
+
+[[record.ApiUser.fields]]
+name = "acct_type"
+type = "i64"
+
+[record.DbUser]
+
+[record.DbUser.sink]
+table       = "global_users"
+primary_key = "pccuid"
+extra_copy  = ["id = pccuid"]
+upsert      = true
+
+[[record.DbUser.fields]]
+name = "pccuid"
+type = "i64"
+
+[[record.DbUser.fields]]
+name = "sso_acct"
+type = "String"
+
+[[record.DbUser.fields]]
+name = "fact_no"
+type = "Option<String>"
+
+[[record.DbUser.fields]]
+name = "local_fact_no"
+type = "Option<String>"
+
+[[record.DbUser.fields]]
+name = "chinese_nm"
+type = "Option<String>"
+
+[[record.DbUser.fields]]
+name = "local_pnl_nm"
+type = "Option<String>"
+
+[[record.DbUser.fields]]
+name = "english_nm"
+type = "Option<String>"
+
+[[record.DbUser.fields]]
+name = "contact_mail"
+type = "String"
+
+[[record.DbUser.fields]]
+name = "sex"
+type = "Option<String>"
+
+[[record.DbUser.fields]]
+name = "lo_posi_nm"
+type = "Option<String>"
+
+[[record.DbUser.fields]]
+name = "disabled"
+type = "String"
+
+[[record.DbUser.fields]]
+name = "disabled_date"
+type = "Option<DateTime<Utc>>"
+
+[[record.DbUser.fields]]
+name = "update_date"
+type = "DateTime<Utc>"
+
+[[record.DbUser.fields]]
+name = "lo_dept_nm"
+type = "Option<String>"
+
+[[record.DbUser.fields]]
+name = "tel"
+type = "String"
+
+[[record.DbUser.fields]]
+name = "leave_mk"
+type = "Option<String>"
+
+[[record.DbUser.fields]]
+name = "acct_type"
+type = "String"
+
+[mapping.user]
+name = "UserTransform"
+from = "ApiUser"
+to   = "DbUser"
+
+[[mapping.user.rules]]
+field = "pccuid"
+rule  = "copy"
+
+[[mapping.user.rules]]
+field = "sso_acct"
+rule  = "copy"
+
+[[mapping.user.rules]]
+field = "fact_no"
+rule  = "copy"
+
+[[mapping.user.rules]]
+field = "local_fact_no"
+rule  = "copy"
+
+[[mapping.user.rules]]
+field = "chinese_nm"
+rule  = "copy"
+
+[[mapping.user.rules]]
+field = "local_pnl_nm"
+rule  = "copy"
+
+[[mapping.user.rules]]
+field = "english_nm"
+rule  = "copy"
+
+[[mapping.user.rules]]
+field = "contact_mail"
+rule  = "null_to_empty"
+
+[[mapping.user.rules]]
+field = "sex"
+rule  = "copy"
+
+[[mapping.user.rules]]
+field = "lo_posi_nm"
+rule  = "copy"
+
+[[mapping.user.rules]]
+field = "disabled"
+rule  = "bool_to_yn"
+
+[[mapping.user.rules]]
+field = "disabled_date"
+rule  = "epoch_ms_to_ts"
+
+[[mapping.user.rules]]
+field = "update_date"
+rule  = "epoch_ms_to_ts"
+
+[[mapping.user.rules]]
+field = "lo_dept_nm"
+rule  = "copy"
+
+[[mapping.user.rules]]
+field = "tel"
+rule  = "null_to_empty"
+
+[[mapping.user.rules]]
+field = "leave_mk"
+rule  = "copy"
+
+[[mapping.user.rules]]
+field = "acct_type"
+rule  = "to_string"

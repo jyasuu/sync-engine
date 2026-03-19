@@ -1,0 +1,19 @@
+# user-sync/pipeline.toml
+#
+# Declares which assembled components run on which cron schedule.
+# Add a [[pipeline]] block to run additional schedules without any code change.
+
+[[pipeline]]
+name      = "global-user-sync"
+source    = "user-api"
+transform = "user"
+sink      = "postgres"
+cron      = "0 0 2 * * *"
+
+# Example: weekly full backfill on Sundays at 03:00
+# [[pipeline]]
+# name      = "global-user-backfill"
+# source    = "user-api"
+# transform = "user"
+# sink      = "postgres"
+# cron      = "0 0 3 * * 0"

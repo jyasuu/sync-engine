@@ -1,0 +1,25 @@
+# user-sync/config.toml
+# Runtime configuration. Override any value with an environment variable
+# of the same name (uppercased). Environment variables take precedence.
+
+[scheduler]
+cron = "0 0 2 * * *"
+
+[source]
+user_endpoint        = "https://user-service.example.com/api/users"
+start_interval       = 30
+end_interval         = 0
+interval_limit       = 7
+include_realm_types  = ""
+
+[auth]
+token_url     = "https://auth.example.com/oauth2/token"
+client_id     = ""
+client_secret = ""
+
+[sink]
+database_url = "postgres://user:password@localhost:5432/mydb"
+sync_sql     = ""
+
+[log]
+rust_log = "user_sync=info"
