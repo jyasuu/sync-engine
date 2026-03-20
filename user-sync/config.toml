@@ -1,26 +1,51 @@
 # user-sync/config.toml
-# Runtime configuration. Override any value with an environment variable
-# of the same name (uppercased). Environment variables take precedence.
+# Runtime configuration.
+# Every key can be overridden by an environment variable:
+#   SECTION__KEY=value   (double-underscore separator)
+# Example: AUTH__CLIENT_SECRET=prod-secret
 
 [scheduler]
-cron = "0 0 2 * * *"
+cron              = "0 0 2 * * *"
+cron__desc        = "6-field cron expression (seconds first). When to run the sync."
+cron__example     = "0 0 2 * * *  → daily at 02:00 | */5 * * * * * → every 5 seconds"
 
 [source]
-user_endpoint        = "https://user-service.example.com/api/users"
-start_interval       = 30
-end_interval         = 0
-interval_limit       = 7
-window_sleep_secs    = 60
-include_realm_types  = ""
+user_endpoint             = "https://user-service.example.com/api/users"
+user_endpoint__desc       = "Base URL of the user API."
+
+start_interval            = 30
+start_interval__desc      = "Fetch users updated up to this many days ago (outer boundary)."
+
+end_interval              = 0
+end_interval__desc        = "Stop at this many days ago. 0 = today (inner boundary)."
+
+interval_limit            = 7
+interval_limit__desc      = "Maximum day-range per API call. Controls chunk size."
+
+window_sleep_secs         = 60
+window_sleep_secs__desc   = "Seconds to sleep between windows. Set to 0 for testing."
+
+include_realm_types       = ""
+include_realm_types__desc = "Comma-separated realm filter. Empty = all realms."
 
 [auth]
-token_url     = "https://auth.example.com/oauth2/token"
-client_id     = ""
-client_secret = ""
+token_url             = "https://auth.example.com/oauth2/token"
+token_url__desc       = "OAuth2 token endpoint URL."
+
+client_id             = ""
+client_id__desc       = "OAuth2 client identifier."
+
+client_secret         = ""
+client_secret__desc   = "OAuth2 client secret. Use AUTH__CLIENT_SECRET env var in production."
 
 [sink]
-database_url = "postgres://user:password@localhost:5432/mydb"
-sync_sql     = ""
+database_url          = "postgres://user:password@localhost:5432/mydb"
+database_url__desc    = "PostgreSQL connection string. Use SINK__DATABASE_URL env var in production."
+
+sync_sql              = ""
+sync_sql__desc        = "Optional SQL run once after every full sync cycle. Example: REFRESH MATERIALIZED VIEW mv_active_users;"
 
 [log]
-rust_log = "user_sync=debug"
+rust_log              = "user_sync=info"
+rust_log__desc        = "tracing log filter. Levels: error < warn < info < debug"
+rust_log__example     = "user_sync=debug  →  verbose | user_sync=warn  →  quiet"
