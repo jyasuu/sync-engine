@@ -12,8 +12,6 @@ use crate::generated::{envelopes::ApiUserResponse, records::DbUser, transforms::
 
 pub struct UserSyncJob;
 
-// ── Pre job ───────────────────────────────────────────────────────────────
-
 #[async_trait]
 impl PreJob for UserSyncJob {
     type Cx = JobConnections;
@@ -24,8 +22,6 @@ impl PreJob for UserSyncJob {
     }
 }
 
-// ── Main job ──────────────────────────────────────────────────────────────
-
 #[async_trait]
 impl MainJob for UserSyncJob {
     type Cx = JobConnections;
@@ -35,9 +31,9 @@ impl MainJob for UserSyncJob {
         let mut summary = JobSummary::default();
 
         let mut iter = DateWindowIter::new(
-            cfg.start_interval, // flat field
-            cfg.end_interval,
-            cfg.interval_limit,
+            cfg.source.start_interval, // nested
+            cfg.source.end_interval,
+            cfg.source.interval_limit,
         );
 
         while let Some((start, end)) = iter.next_window().await {
@@ -45,7 +41,6 @@ impl MainJob for UserSyncJob {
             tracing::info!(start, end, "Processing window");
 
             let result = with_retry(5, || async {
-                // 1. fetch
                 let token = cx.auth.get_token().await?;
                 let now = Utc::now();
                 let fmt = "%Y%m%d";
@@ -63,9 +58,7 @@ impl MainJob for UserSyncJob {
                     .timeout(std::time::Duration::from_secs(600));
 
                 if let Some(ref rt) = cx.user_service.realm_type {
-                    if !rt.is_empty() {
-                        req = req.query(&[("realm_type", rt)]);
-                    }
+                    req = req.query(&[("realm_type", rt)]);
                 }
 
                 let resp = req.send().await.context("HTTP request failed")?;
@@ -83,7 +76,6 @@ impl MainJob for UserSyncJob {
 
                 tracing::info!("Fetched {} users", envelope.data.len());
 
-                // 2. map response → DbUser
                 let transform = UserTransform;
                 let db_users: Vec<DbUser> = envelope
                     .data
@@ -97,10 +89,8 @@ impl MainJob for UserSyncJob {
                     })
                     .collect();
 
-                // 3. begin tx
                 let mut tx = cx.db.begin().await.context("Failed to begin tx")?;
 
-                // 4. upsert each row
                 let mut upserted = 0usize;
                 let mut skipped = 0usize;
                 for user in &db_users {
@@ -113,7 +103,6 @@ impl MainJob for UserSyncJob {
                     }
                 }
 
-                // 5. commit
                 tx.commit().await.context("Failed to commit tx")?;
                 tracing::info!(upserted, skipped, "Window committed");
                 Ok((db_users.len(), upserted, skipped))
@@ -138,8 +127,6 @@ impl MainJob for UserSyncJob {
     }
 }
 
-// ── Post job ──────────────────────────────────────────────────────────────
-
 #[async_trait]
 impl PostJob for UserSyncJob {
     type Cx = JobConnections;
@@ -158,16 +145,13 @@ impl PostJob for UserSyncJob {
             tracing::warn!(error = %err, "Error during job");
         }
 
-        // optional post-sync SQL
-        if let Some(ref sql) = cfg.sync_sql {
-            // flat field, Option<String>
-            if !sql.trim().is_empty() {
-                tracing::info!("Running post-sync SQL");
-                sqlx::raw_sql(sql)
-                    .execute(&cx.db)
-                    .await
-                    .context("Post-sync SQL failed")?;
-            }
+        if !cfg.sink.sync_sql.trim().is_empty() {
+            // nested
+            tracing::info!("Running post-sync SQL");
+            sqlx::raw_sql(&cfg.sink.sync_sql)
+                .execute(&cx.db)
+                .await
+                .context("Post-sync SQL failed")?;
         }
 
         Ok(())

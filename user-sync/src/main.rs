@@ -19,18 +19,14 @@ async fn main() -> Result<()> {
     let cfg = AppConfig::from_env()?;
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("user_sync=info")),
-        )
+        .with_env_filter(EnvFilter::new(&cfg.log.rust_log)) // nested
         .init();
 
-    let cron = cfg.cron.clone(); // clone before Arc::new consumes cfg
+    let cron = cfg.scheduler.cron.clone(); // nested
     let cfg_arc: Arc<AppConfig> = Arc::new(cfg);
-
-    // clone for the logging line BEFORE moving into the closure
     let cfg_for_log = Arc::clone(&cfg_arc);
 
-    let mut scheduler = JobScheduler::new().await?; // mut for shutdown()
+    let mut scheduler = JobScheduler::new().await?;
 
     scheduler
         .add(Job::new_async(cron.as_str(), move |_, _| {
@@ -46,7 +42,7 @@ async fn main() -> Result<()> {
         .await?;
 
     scheduler.start().await?;
-    tracing::info!("user-sync scheduled ({})", cfg_for_log.cron);
+    tracing::info!("user-sync scheduled ({})", cfg_for_log.scheduler.cron);
 
     tokio::signal::ctrl_c().await?;
     scheduler.shutdown().await?;

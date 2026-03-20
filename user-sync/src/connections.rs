@@ -110,27 +110,32 @@ impl JobConnections {
         tracing::info!("pre_job: creating postgres connection pool");
         let db = PgPoolOptions::new()
             .max_connections(5)
-            .connect(&cfg.database_url) // flat field
+            .connect(&cfg.sink.database_url) // nested: cfg.sink.database_url
             .await?;
 
-        tracing::info!("pre_job: creating oauth2 client");
         let http = Client::builder()
             .timeout(std::time::Duration::from_secs(620))
             .tcp_keepalive(std::time::Duration::from_secs(30))
             .build()?;
 
+        tracing::info!("pre_job: creating oauth2 client");
         let auth = OAuth2Client::new(
             http.clone(),
-            &cfg.token_url, // flat field
-            &cfg.client_id,
-            &cfg.client_secret,
+            &cfg.auth.token_url, // nested: cfg.auth.*
+            &cfg.auth.client_id,
+            &cfg.auth.client_secret,
         );
 
         tracing::info!("pre_job: creating user service client");
+        let realm = if cfg.source.include_realm_types.is_empty() {
+            None
+        } else {
+            Some(cfg.source.include_realm_types.clone())
+        };
         let user_service = UserServiceClient::new(
             http,
-            &cfg.user_endpoint, // flat field
-            cfg.include_realm_types.clone(),
+            &cfg.source.user_endpoint, // nested: cfg.source.*
+            realm,
         );
 
         Ok(Self {

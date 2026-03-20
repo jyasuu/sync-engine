@@ -1,61 +1,88 @@
 // user-sync/src/config.rs
+//
+// All configuration is declared in config.toml.
+// Environment variables override individual keys using the pattern:
+//   SECTION__KEY  (double underscore as separator)
+//
+// Examples:
+//   AUTH__CLIENT_SECRET=prod-secret
+//   SINK__DATABASE_URL=postgres://...
+//   SOURCE__USER_ENDPOINT=https://...
+//   SCHEDULER__CRON="0 0 3 * * *"
+//
+// No env var string literals anywhere in Rust code.
+
 use anyhow::{Context, Result};
+use serde::Deserialize;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
-    // Scheduler
-    pub cron: String,
+    pub scheduler: SchedulerConfig,
+    pub source: SourceConfig,
+    pub auth: AuthConfig,
+    pub sink: SinkConfig,
+    #[serde(default)]
+    pub log: LogConfig,
+}
 
-    // DateWindowIter
+#[derive(Debug, Clone, Deserialize)]
+pub struct SchedulerConfig {
+    pub cron: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SourceConfig {
+    pub user_endpoint: String,
     pub start_interval: i64,
     pub end_interval: i64,
     pub interval_limit: i64,
+    #[serde(default)]
+    pub include_realm_types: String,
+}
 
-    // OAuth2Client
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthConfig {
     pub token_url: String,
     pub client_id: String,
     pub client_secret: String,
+}
 
-    // UserServiceClient
-    pub user_endpoint: String,
-    pub include_realm_types: Option<String>,
-
-    // PostgresWriter / post-sync
+#[derive(Debug, Clone, Deserialize)]
+pub struct SinkConfig {
     pub database_url: String,
-    pub sync_sql: Option<String>,
+    #[serde(default)]
+    pub sync_sql: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct LogConfig {
+    #[serde(default = "default_log")]
+    pub rust_log: String,
+}
+fn default_log() -> String {
+    "user_sync=info".into()
 }
 
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
         dotenvy::dotenv().ok();
-        Ok(Self {
-            cron: std::env::var("CRON").unwrap_or_else(|_| "0 0 2 * * *".into()),
 
-            start_interval: env_parse("START_INTERVAL").unwrap_or(30),
-            end_interval: env_parse("END_INTERVAL").unwrap_or(0),
-            interval_limit: env_parse("INTERVAL_LIMIT").unwrap_or(7),
-
-            token_url: env("TOKEN_URL")?,
-            client_id: env("CLIENT_ID")?,
-            client_secret: env("CLIENT_SECRET")?,
-
-            user_endpoint: env("USER_ENDPOINT")?,
-            include_realm_types: std::env::var("INCLUDE_REALM_TYPES")
-                .ok()
-                .filter(|s| !s.is_empty()),
-
-            database_url: env("DATABASE_URL")?,
-            sync_sql: std::env::var("SYNC_SQL")
-                .ok()
-                .filter(|s| !s.trim().is_empty()),
-        })
+        config::Config::builder()
+            // 1. base: config.toml defines all keys and defaults
+            .add_source(
+                config::File::with_name("config")
+                    .format(config::FileFormat::Toml)
+                    .required(true),
+            )
+            // 2. overlay: env vars using __ separator, e.g. AUTH__CLIENT_SECRET
+            .add_source(
+                config::Environment::default()
+                    .separator("__")
+                    .try_parsing(true),
+            )
+            .build()
+            .context("Failed to build config")?
+            .try_deserialize()
+            .context("Failed to deserialize config")
     }
-}
-
-fn env(key: &str) -> Result<String> {
-    std::env::var(key).with_context(|| format!("{key} not set"))
-}
-
-fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
-    std::env::var(key).ok()?.parse().ok()
 }

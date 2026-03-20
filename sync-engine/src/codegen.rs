@@ -99,9 +99,15 @@ fn gen_struct(name: &str, def: &RecordDef) -> String {
 fn gen_envelope(record_name: &str, hint: &FetcherHint) -> String {
     let field = &hint.envelope_field;
     let mut out = String::new();
+    writeln!(out, "#[allow(dead_code)]").unwrap();
     writeln!(out, "#[derive(Debug, serde::Deserialize)]").unwrap();
     writeln!(out, "#[allow(dead_code)]").unwrap();
-    writeln!(out, "pub struct {record_name}Response {{").unwrap();
+    writeln!(
+        out,
+        "#[allow(dead_code)]
+pub struct {record_name}Response {{"
+    )
+    .unwrap();
     writeln!(out, "    pub timestamp:   i64,").unwrap();
     writeln!(out, "    pub status_code: i64,").unwrap();
     writeln!(out, "    pub {field}:     Vec<{record_name}>,").unwrap();
