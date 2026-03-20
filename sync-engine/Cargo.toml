@@ -7,6 +7,7 @@ edition = "2021"
 name = "sync_engine"
 path = "src/lib.rs"
 
+# Runtime dependencies
 [dependencies]
 tokio                = { version = "1",    features = ["full"] }
 tokio-cron-scheduler = "0.13"
@@ -20,3 +21,8 @@ toml                 = "0.8"
 anyhow               = "1"
 backon               = "1"
 tracing              = "0.1"
+
+# Build-time dependencies (for the build.rs that downstream crates reuse)
+[build-dependencies]
+toml  = "0.8"
+serde = { version = "1", features = ["derive"] }

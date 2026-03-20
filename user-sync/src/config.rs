@@ -1,30 +1,26 @@
 // user-sync/src/config.rs
-//
-// Single source of truth for all environment variables.
-// Loaded once at startup and passed into each primitive constructor.
-// No primitive reads std::env::var() directly — they all receive AppConfig.
-
 use anyhow::{Context, Result};
-use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    // ── DateWindowChunker ─────────────────────────────────────────────
+    // Scheduler
+    pub cron: String,
+
+    // DateWindowIter
     pub start_interval: i64,
     pub end_interval: i64,
     pub interval_limit: i64,
-    pub chunk_sleep: Duration,
 
-    // ── OAuth2Auth ────────────────────────────────────────────────────
+    // OAuth2Client
     pub token_url: String,
     pub client_id: String,
     pub client_secret: String,
 
-    // ── HttpJsonFetcher ───────────────────────────────────────────────
+    // UserServiceClient
     pub user_endpoint: String,
     pub include_realm_types: Option<String>,
 
-    // ── PostgresWriter / RawSqlHook ───────────────────────────────────
+    // PostgresWriter / post-sync
     pub database_url: String,
     pub sync_sql: Option<String>,
 }
@@ -33,10 +29,11 @@ impl AppConfig {
     pub fn from_env() -> Result<Self> {
         dotenvy::dotenv().ok();
         Ok(Self {
+            cron: std::env::var("CRON").unwrap_or_else(|_| "0 0 2 * * *".into()),
+
             start_interval: env_parse("START_INTERVAL").unwrap_or(30),
             end_interval: env_parse("END_INTERVAL").unwrap_or(0),
             interval_limit: env_parse("INTERVAL_LIMIT").unwrap_or(7),
-            chunk_sleep: Duration::from_secs(60),
 
             token_url: env("TOKEN_URL")?,
             client_id: env("CLIENT_ID")?,

@@ -20,19 +20,256 @@ workspace/
 
 Each layer has a distinct owner and change cadence.
 
-![](docs/three-layer-config-system.svg)
+<!--
+  Diagram: Three-layer config
+-->
+<p align="center">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 310" width="640">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#888780"
+            stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- pipeline.toml -->
+  <rect x="20" y="20" width="175" height="88" rx="8"
+        fill="#EAF3DE" stroke="#3B6D11" stroke-width="0.75"/>
+  <text x="107" y="44" font-family="monospace" font-size="13" font-weight="600"
+        fill="#27500A" text-anchor="middle">pipeline.toml</text>
+  <text x="107" y="64" font-family="monospace" font-size="11"
+        fill="#3B6D11" text-anchor="middle">source = "user-api"</text>
+  <text x="107" y="80" font-family="monospace" font-size="11"
+        fill="#3B6D11" text-anchor="middle">transform = "user"</text>
+  <text x="107" y="96" font-family="monospace" font-size="11"
+        fill="#3B6D11" text-anchor="middle">cron = "0 0 2 * * *"</text>
+  <text x="107" y="120" font-family="sans-serif" font-size="10"
+        fill="#639922" text-anchor="middle">topology + schedule</text>
+
+  <!-- component.toml -->
+  <rect x="233" y="20" width="175" height="88" rx="8"
+        fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+  <text x="320" y="44" font-family="monospace" font-size="13" font-weight="600"
+        fill="#26215C" text-anchor="middle">component.toml</text>
+  <text x="320" y="64" font-family="monospace" font-size="11"
+        fill="#534AB7" text-anchor="middle">chunker = "date-window"</text>
+  <text x="320" y="80" font-family="monospace" font-size="11"
+        fill="#534AB7" text-anchor="middle">auth    = "oauth2"</text>
+  <text x="320" y="96" font-family="monospace" font-size="11"
+        fill="#534AB7" text-anchor="middle">fetcher = "http-json"</text>
+  <text x="320" y="120" font-family="sans-serif" font-size="10"
+        fill="#7F77DD" text-anchor="middle">primitive assembly</text>
+
+  <!-- config.toml -->
+  <rect x="446" y="20" width="175" height="88" rx="8"
+        fill="#FAECE7" stroke="#993C1D" stroke-width="0.75"/>
+  <text x="533" y="44" font-family="monospace" font-size="13" font-weight="600"
+        fill="#4A1B0C" text-anchor="middle">config.toml</text>
+  <text x="533" y="64" font-family="monospace" font-size="11"
+        fill="#993C1D" text-anchor="middle">token_url = "..."</text>
+  <text x="533" y="80" font-family="monospace" font-size="11"
+        fill="#993C1D" text-anchor="middle">database_url = "..."</text>
+  <text x="533" y="96" font-family="monospace" font-size="11"
+        fill="#993C1D" text-anchor="middle">start_interval = 30</text>
+  <text x="533" y="120" font-family="sans-serif" font-size="10"
+        fill="#D85A30" text-anchor="middle">runtime values + env overlay</text>
+
+  <!-- arrows down -->
+  <line x1="107" y1="140" x2="107" y2="168"
+        stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="320" y1="140" x2="320" y2="168"
+        stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="533" y1="140" x2="533" y2="168"
+        stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+
+  <!-- Runtime -->
+  <rect x="20" y="170" width="600" height="56" rx="8"
+        fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="320" y="194" font-family="sans-serif" font-size="13" font-weight="600"
+        fill="#2C2C2A" text-anchor="middle">PipelineRunner  (sync-engine)</text>
+  <text x="320" y="214" font-family="sans-serif" font-size="11"
+        fill="#5F5E5A" text-anchor="middle">resolves names → builds instances → drives cron loop</text>
+
+  <!-- arrows down to external -->
+  <line x1="220" y1="226" x2="180" y2="264"
+        stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="320" y1="226" x2="320" y2="264"
+        stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="420" y1="226" x2="460" y2="264"
+        stroke="#888780" stroke-width="1" marker-end="url(#arr)"/>
+
+  <rect x="60"  y="266" width="120" height="32" rx="6"
+        fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+  <text x="120" y="286" font-family="sans-serif" font-size="11"
+        fill="#085041" text-anchor="middle">User API (HTTP)</text>
+
+  <rect x="260" y="266" width="120" height="32" rx="6"
+        fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+  <text x="320" y="286" font-family="sans-serif" font-size="11"
+        fill="#085041" text-anchor="middle">Transform</text>
+
+  <rect x="400" y="266" width="160" height="32" rx="6"
+        fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+  <text x="480" y="286" font-family="sans-serif" font-size="11"
+        fill="#085041" text-anchor="middle">PostgreSQL</text>
+</svg>
+</p>
 
 ### Source decomposition
 
 A `Source` is assembled from three independent primitives. Each is registered by a string key and can be swapped in `component.toml` without any code change.
 
-![](docs/source-decomposition.svg)
+<!--
+  Diagram: Source decomposition
+-->
+<p align="center">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 230" width="640">
+  <defs>
+    <marker id="arr2" viewBox="0 0 10 10" refX="8" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#888780"
+            stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- Chunker -->
+  <rect x="20" y="20" width="175" height="76" rx="8"
+        fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+  <text x="107" y="44" font-family="monospace" font-size="12" font-weight="600"
+        fill="#04342C" text-anchor="middle">Chunker</text>
+  <text x="107" y="62" font-family="monospace" font-size="10"
+        fill="#0F6E56" text-anchor="middle">"date-window"</text>
+  <text x="107" y="78" font-family="sans-serif" font-size="10"
+        fill="#1D9E75" text-anchor="middle">next_window() → FetchParams</text>
+  <text x="107" y="108" font-family="sans-serif" font-size="10"
+        fill="#5F5E5A" text-anchor="middle">owns: start/end/interval</text>
+
+  <!-- Auth -->
+  <rect x="233" y="20" width="175" height="76" rx="8"
+        fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+  <text x="320" y="44" font-family="monospace" font-size="12" font-weight="600"
+        fill="#26215C" text-anchor="middle">Auth</text>
+  <text x="320" y="62" font-family="monospace" font-size="10"
+        fill="#534AB7" text-anchor="middle">"oauth2"</text>
+  <text x="320" y="78" font-family="sans-serif" font-size="10"
+        fill="#7F77DD" text-anchor="middle">get_token() → String</text>
+  <text x="320" y="108" font-family="sans-serif" font-size="10"
+        fill="#5F5E5A" text-anchor="middle">owns: token cache + credentials</text>
+
+  <!-- Fetcher -->
+  <rect x="446" y="20" width="175" height="76" rx="8"
+        fill="#FAECE7" stroke="#993C1D" stroke-width="0.75"/>
+  <text x="533" y="44" font-family="monospace" font-size="12" font-weight="600"
+        fill="#4A1B0C" text-anchor="middle">Fetcher</text>
+  <text x="533" y="62" font-family="monospace" font-size="10"
+        fill="#993C1D" text-anchor="middle">"http-json"</text>
+  <text x="533" y="78" font-family="sans-serif" font-size="10"
+        fill="#D85A30" text-anchor="middle">fetch(params, token) → Vec&lt;T&gt;</text>
+  <text x="533" y="108" font-family="sans-serif" font-size="10"
+        fill="#5F5E5A" text-anchor="middle">owns: endpoint + retry</text>
+
+  <!-- arrows converge -->
+  <line x1="107" y1="118" x2="270" y2="162"
+        stroke="#888780" stroke-width="1" marker-end="url(#arr2)"/>
+  <line x1="320" y1="118" x2="320" y2="162"
+        stroke="#888780" stroke-width="1" marker-end="url(#arr2)"/>
+  <line x1="533" y1="118" x2="370" y2="162"
+        stroke="#888780" stroke-width="1" marker-end="url(#arr2)"/>
+
+  <!-- ComposedSource -->
+  <rect x="160" y="164" width="320" height="48" rx="8"
+        fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="320" y="184" font-family="sans-serif" font-size="12" font-weight="600"
+        fill="#2C2C2A" text-anchor="middle">ComposedSource&lt;C, A, F&gt;</text>
+  <text x="320" y="202" font-family="sans-serif" font-size="10"
+        fill="#5F5E5A" text-anchor="middle">implements Source trait — engine never changes</text>
+</svg>
+</p>
 
 ### Build-time code generation
 
 `schema.toml` is the single source of truth for all domain types. `build.rs` generates Rust from it at compile time — no hand-written structs or mapping logic.
 
-![](docs/build-time-codegen.svg)
+<!--
+  Diagram: Build-time codegen
+-->
+<p align="center">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 200" width="640">
+  <defs>
+    <marker id="arr3" viewBox="0 0 10 10" refX="8" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#888780"
+            stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- schema.toml -->
+  <rect x="20" y="60" width="155" height="80" rx="8"
+        fill="#FAEEDA" stroke="#854F0B" stroke-width="0.75"/>
+  <text x="97" y="84" font-family="monospace" font-size="12" font-weight="600"
+        fill="#412402" text-anchor="middle">schema.toml</text>
+  <text x="97" y="102" font-family="sans-serif" font-size="10"
+        fill="#854F0B" text-anchor="middle">record shapes</text>
+  <text x="97" y="118" font-family="sans-serif" font-size="10"
+        fill="#854F0B" text-anchor="middle">field types</text>
+  <text x="97" y="134" font-family="sans-serif" font-size="10"
+        fill="#854F0B" text-anchor="middle">mapping rules</text>
+
+  <!-- build.rs -->
+  <line x1="175" y1="100" x2="218" y2="100"
+        stroke="#888780" stroke-width="1" marker-end="url(#arr3)"/>
+  <rect x="220" y="68" width="120" height="64" rx="8"
+        fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.75"/>
+  <text x="280" y="92" font-family="monospace" font-size="12" font-weight="600"
+        fill="#2C2C2A" text-anchor="middle">build.rs</text>
+  <text x="280" y="110" font-family="sans-serif" font-size="10"
+        fill="#5F5E5A" text-anchor="middle">compile-time</text>
+  <text x="280" y="126" font-family="sans-serif" font-size="10"
+        fill="#5F5E5A" text-anchor="middle">code generator</text>
+
+  <!-- four outputs -->
+  <line x1="340" y1="100" x2="383" y2="100"
+        stroke="#888780" stroke-width="1" marker-end="url(#arr3)"/>
+
+  <rect x="385" y="18"  width="128" height="28" rx="6"
+        fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+  <text x="449" y="36" font-family="monospace" font-size="10"
+        fill="#085041" text-anchor="middle">records.rs  (structs)</text>
+
+  <rect x="385" y="54"  width="128" height="28" rx="6"
+        fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+  <text x="449" y="72" font-family="monospace" font-size="10"
+        fill="#085041" text-anchor="middle">envelopes.rs (HasEnvelope)</text>
+
+  <rect x="385" y="90"  width="128" height="28" rx="6"
+        fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+  <text x="449" y="108" font-family="monospace" font-size="10"
+        fill="#085041" text-anchor="middle">upserts.rs (Upsertable)</text>
+
+  <rect x="385" y="126" width="128" height="28" rx="6"
+        fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.75"/>
+  <text x="449" y="144" font-family="monospace" font-size="10"
+        fill="#085041" text-anchor="middle">transforms.rs (Transform)</text>
+
+  <!-- fan lines from arrow endpoint to boxes -->
+  <line x1="383" y1="100" x2="385" y2="32"  stroke="#1D9E75" stroke-width="0.75"/>
+  <line x1="383" y1="100" x2="385" y2="68"  stroke="#1D9E75" stroke-width="0.75"/>
+  <line x1="383" y1="100" x2="385" y2="104" stroke="#1D9E75" stroke-width="0.75"/>
+  <line x1="383" y1="100" x2="385" y2="140" stroke="#1D9E75" stroke-width="0.75"/>
+
+  <!-- trait impls -->
+  <line x1="513" y1="32"  x2="540" y2="32"  stroke="#888780" stroke-width="0.75"/>
+  <line x1="513" y1="68"  x2="540" y2="68"  stroke="#888780" stroke-width="0.75"/>
+  <line x1="513" y1="104" x2="540" y2="104" stroke="#888780" stroke-width="0.75"/>
+  <line x1="513" y1="140" x2="540" y2="140" stroke="#888780" stroke-width="0.75"/>
+
+  <text x="543" y="36"  font-family="sans-serif" font-size="10" fill="#5F5E5A">ApiUser, DbUser</text>
+  <text x="543" y="72"  font-family="sans-serif" font-size="10" fill="#5F5E5A">impl HasEnvelope</text>
+  <text x="543" y="108" font-family="sans-serif" font-size="10" fill="#5F5E5A">impl Upsertable</text>
+  <text x="543" y="144" font-family="sans-serif" font-size="10" fill="#5F5E5A">impl Transform</text>
+</svg>
+</p>
 
 ---
 

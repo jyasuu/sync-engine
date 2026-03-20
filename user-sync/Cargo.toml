@@ -8,19 +8,19 @@ name = "user-sync"
 path = "src/main.rs"
 
 [dependencies]
-sync-engine        = { path = "../sync-engine" }
-tokio              = { version = "1",   features = ["full"] }
-anyhow             = "1"
-dotenvy            = "0.15"
-chrono             = { version = "0.4", features = ["serde"] }
-sqlx               = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
-serde              = { version = "1",   features = ["derive"] }
-async-trait        = "0.1"
-config             = { version = "0.14", features = ["toml"] }
-tracing            = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-reqwest            = { version = "0.12", features = ["json"] }
+sync-engine          = { path = "../sync-engine" }
+tokio                = { version = "1",    features = ["full"] }
+tokio-cron-scheduler = "0.13"
+anyhow               = "1"
+dotenvy              = "0.15"
+chrono               = { version = "0.4",  features = ["serde"] }
+sqlx                 = { version = "0.8",  features = ["runtime-tokio", "postgres", "chrono"] }
+serde                = { version = "1",    features = ["derive"] }
+async-trait          = "0.1"
+reqwest              = { version = "0.12", features = ["json"] }
+tracing              = "0.1"
+tracing-subscriber   = { version = "0.3",  features = ["env-filter"] }
 
+# sync-engine used as build-dependency so build.rs can call sync_engine::codegen::generate()
 [build-dependencies]
-toml  = "0.8"
-serde = { version = "1", features = ["derive"] }
+sync-engine = { path = "../sync-engine" }
