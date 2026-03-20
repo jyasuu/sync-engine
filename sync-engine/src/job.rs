@@ -55,7 +55,7 @@ where
     Ok(())
 }
 
-// ── Date window iterator ───────────────────────────────────────────────────
+// ── Date window iterator ──────────────────────────────────────────────────
 
 pub struct DateWindowIter {
     pub cursor: i64,
@@ -76,7 +76,6 @@ impl DateWindowIter {
         }
     }
 
-    /// For testing — skip the inter-window sleep
     pub fn without_sleep(mut self) -> Self {
         self.sleep = Duration::ZERO;
         self
@@ -86,9 +85,6 @@ impl DateWindowIter {
         self.next_window_with_sleep(true).await
     }
 
-    /// Like next_window but allows the caller to suppress the inter-window
-    /// sleep — useful when the previous window failed and you don't want
-    /// to hold a lock for 60 s before moving on.
     pub async fn next_window_with_sleep(&mut self, do_sleep: bool) -> Option<(i64, i64)> {
         tracing::debug!(cursor = self.cursor, end = self.end, "next_window called");
         if self.cursor <= self.end {
@@ -108,7 +104,7 @@ impl DateWindowIter {
     }
 }
 
-// ── Retry helper ───────────────────────────────────────────────────────────
+// ── Retry helper ──────────────────────────────────────────────────────────
 
 pub async fn with_retry<F, Fut, T>(max_attempts: usize, mut f: F) -> Result<T>
 where

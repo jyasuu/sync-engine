@@ -46,12 +46,14 @@ where
             .get(&self.endpoint)
             .bearer_auth(token)
             .timeout(Duration::from_secs(600));
+
         for (k, v) in &params.query {
             req = req.query(&[(k, v)]);
         }
         if let Some(rt) = &self.realm_type {
             req = req.query(&[("realm_type", rt)]);
         }
+
         info!(endpoint = %self.endpoint, "HTTP fetch");
         let resp = req.send().await.context("HTTP request failed")?;
         if resp.status() == StatusCode::UNAUTHORIZED {

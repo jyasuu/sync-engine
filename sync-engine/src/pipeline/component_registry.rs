@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tracing::info;
 
-use super::primitives::{Auth, Chunker, FetchParams};
+use super::primitives::{Auth, Chunker, FetchParams, Fetcher};
 use super::registry::{AnySink, AnySource, AnyTransform, Registry};
 
 // ── Erased fetcher ────────────────────────────────────────────────────────
@@ -25,7 +25,7 @@ pub trait AnyFetcher: Send + Sync {
 }
 
 #[async_trait]
-impl<F: super::primitives::Fetcher + Send + Sync> AnyFetcher for F
+impl<F: Fetcher + Send + Sync> AnyFetcher for F
 where
     F::Item: 'static,
 {
@@ -72,10 +72,12 @@ pub struct SourceDef {
     pub auth: String,
     pub fetcher: String,
 }
+
 #[derive(Debug, Deserialize)]
 pub struct TransformDef {
     pub mapper: String,
 }
+
 #[derive(Debug, Deserialize)]
 pub struct SinkDef {
     pub writer: String,

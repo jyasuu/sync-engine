@@ -4,16 +4,20 @@
 //
 //   fn main() {
 //       sync_engine::codegen::generate("schema.toml");
+//       sync_engine::codegen::generate_config_doc("config.toml", "schema.toml", "CONFIG.md");
 //   }
 //
-// This works because sync-engine is listed in BOTH [dependencies] and
-// [build-dependencies] — Cargo compiles it twice (host + target), no conflict.
+// Changes vs original:
+//   - gen_upsert now emits BOTH Upsertable (pool) AND UpsertableInTx (transaction)
+//     so the hand-written upsert_in_tx blocks in business crates are no longer needed.
 
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+// ── Schema types ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct Schema {
@@ -73,12 +77,23 @@ pub struct MappingDef {
 
 #[derive(Debug, Deserialize)]
 pub struct RuleDef {
+    /// The target (DbModel) field name — always snake_case.
     pub field: String,
+    /// The source (ApiRecord) field name. Defaults to `field` if omitted,
+    /// which works when both sides have the same name. Set explicitly when
+    /// the API uses camelCase and the DB uses snake_case.
+    pub source: Option<String>,
     pub rule: String,
 }
 
+// ── Generators ────────────────────────────────────────────────────────────
+
 fn gen_struct(name: &str, def: &RecordDef) -> String {
     let mut out = String::new();
+    if def.serde_rename.is_some() {
+        // Fields will be camelCase Rust identifiers — suppress the lint.
+        writeln!(out, "#[allow(non_snake_case)]").unwrap();
+    }
     writeln!(out, "#[derive(Debug, Clone, serde::Deserialize)]").unwrap();
     if let Some(ref s) = def.serde_rename {
         writeln!(out, "#[serde(rename_all = \"{s}\")]").unwrap();
@@ -131,7 +146,12 @@ fn gen_envelope(record_name: &str, hint: &FetcherHint) -> String {
     out
 }
 
-fn gen_upsert(record_name: &str, hint: &SinkHint, fields: &[FieldDef]) -> String {
+struct UpsertSql {
+    sql: String,
+    field_names: Vec<String>,
+}
+
+fn build_upsert_sql(hint: &SinkHint, fields: &[FieldDef]) -> UpsertSql {
     let table = &hint.table;
     let pk = &hint.primary_key;
 
@@ -178,9 +198,28 @@ fn gen_upsert(record_name: &str, hint: &SinkHint, fields: &[FieldDef]) -> String
     } else {
         String::new()
     };
-    let sql = format!("INSERT INTO {table} ({all_cols}) VALUES ({all_vals}) {upsert_clause}");
 
+    UpsertSql {
+        sql: format!("INSERT INTO {table} ({all_cols}) VALUES ({all_vals}) {upsert_clause}"),
+        field_names: fields.iter().map(|f| f.name.clone()).collect(),
+    }
+}
+
+fn gen_bind_chain(field_names: &[String]) -> String {
+    field_names
+        .iter()
+        .map(|n| format!("            .bind(&self.{n})"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Emits both `Upsertable` (pool) and `UpsertableInTx` (transaction) impls.
+fn gen_upsert(record_name: &str, hint: &SinkHint, fields: &[FieldDef]) -> String {
+    let UpsertSql { sql, field_names } = build_upsert_sql(hint, fields);
+    let binds = gen_bind_chain(&field_names);
     let mut out = String::new();
+
+    // Pool-based impl — used by PostgresWriter
     writeln!(out, "#[async_trait::async_trait]").unwrap();
     writeln!(out, "impl sync_engine::Upsertable for {record_name} {{").unwrap();
     writeln!(
@@ -189,12 +228,29 @@ fn gen_upsert(record_name: &str, hint: &SinkHint, fields: &[FieldDef]) -> String
     )
     .unwrap();
     writeln!(out, "        sqlx::query(\"{sql}\")").unwrap();
-    for f in fields {
-        writeln!(out, "            .bind(&self.{})", f.name).unwrap();
-    }
+    writeln!(out, "{binds}").unwrap();
     writeln!(
         out,
         "            .execute(pool).await.map(|_| ()).map_err(Into::into)"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    out.push('\n');
+
+    // Transaction-based impl — used by TxWriter (new)
+    writeln!(out, "#[async_trait::async_trait]").unwrap();
+    writeln!(out, "impl sync_engine::UpsertableInTx for {record_name} {{").unwrap();
+    writeln!(
+        out,
+        "    async fn upsert_in_tx(&self, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyhow::Result<()> {{"
+    )
+    .unwrap();
+    writeln!(out, "        sqlx::query(\"{sql}\")").unwrap();
+    writeln!(out, "{binds}").unwrap();
+    writeln!(
+        out,
+        "            .execute(&mut **tx).await.map(|_| ()).map_err(Into::into)"
     )
     .unwrap();
     writeln!(out, "    }}").unwrap();
@@ -205,6 +261,7 @@ fn gen_upsert(record_name: &str, hint: &SinkHint, fields: &[FieldDef]) -> String
 fn gen_transform(mapping: &MappingDef) -> String {
     let mut out = String::new();
     let (name, from, to) = (&mapping.name, &mapping.from, &mapping.to);
+    writeln!(out, "#[derive(Default)]").unwrap();
     writeln!(out, "pub struct {name};").unwrap();
     writeln!(out, "impl sync_engine::Transform for {name} {{").unwrap();
     writeln!(out, "    type Input  = {from};").unwrap();
@@ -216,7 +273,10 @@ fn gen_transform(mapping: &MappingDef) -> String {
     .unwrap();
     writeln!(out, "        Ok({to} {{").unwrap();
     for rule in &mapping.rules {
-        let expr = gen_rule_expr(&rule.field, &rule.rule);
+        // source is the ApiRecord field name (may be camelCase);
+        // field is the DbModel field name (always snake_case).
+        let src = rule.source.as_deref().unwrap_or(&rule.field);
+        let expr = gen_rule_expr(&rule.field, src, &rule.rule);
         writeln!(out, "            {}: {expr},", rule.field).unwrap();
     }
     writeln!(out, "        }})").unwrap();
@@ -225,25 +285,20 @@ fn gen_transform(mapping: &MappingDef) -> String {
     out
 }
 
-fn gen_rule_expr(field: &str, rule: &str) -> String {
+fn gen_rule_expr(field: &str, src: &str, rule: &str) -> String {
     match rule {
-        "copy" => format!("u.{field}"),
-        "null_to_empty" => format!("u.{field}.unwrap_or_default()"),
-        "bool_to_yn" => format!("if u.{field} {{ \"Y\".to_owned() }} else {{ \"N\".to_owned() }}"),
-        "epoch_ms_to_ts" => format!("crate::generated::rules::epoch_ms_to_ts(u.{field})?"),
-        "to_string" => format!("u.{field}.to_string()"),
+        "copy"              => format!("u.{src}"),
+        "null_to_empty"     => format!("u.{src}.unwrap_or_default()"),
+        "bool_to_yn"        => format!("if u.{src} {{ \"Y\".to_owned() }} else {{ \"N\".to_owned() }}"),
+        "option_bool_to_yn" => format!("u.{src}.map(|v| if v {{ \"Y\".to_owned() }} else {{ \"N\".to_owned() }}).unwrap_or_default()"),
+        "epoch_ms_to_ts"    => format!("crate::generated::rules::epoch_ms_to_ts(u.{src})?"),
+        "to_string"         => format!("u.{src}.to_string()"),
         other => panic!("Unknown rule \"{other}\" for field \"{field}\""),
     }
 }
 
-/// Call from a business crate's build.rs:
-///
-/// ```rust
-/// // user-sync/build.rs
-/// fn main() {
-///     sync_engine::codegen::generate("schema.toml");
-/// }
-/// ```
+// ── Public entry point ────────────────────────────────────────────────────
+
 pub fn generate(schema_path: impl AsRef<Path>) {
     let path = schema_path.as_ref();
     println!("cargo:rerun-if-changed={}", path.display());
@@ -254,7 +309,6 @@ pub fn generate(schema_path: impl AsRef<Path>) {
 
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
-    // records.rs — no chrono header; the include! site provides it
     let mut records = String::from("// @generated\n\n");
     let mut envelopes = String::from("// @generated\n\n");
     let mut upserts = String::from("// @generated\n\n");
@@ -285,8 +339,6 @@ pub fn generate(schema_path: impl AsRef<Path>) {
 
 // ── Config doc generator ──────────────────────────────────────────────────
 
-/// Reads config.toml (annotated with __desc / __example keys) and schema.toml,
-/// then writes a CONFIG.md into the project source directory (next to config.toml).
 pub fn generate_config_doc(
     config_path: impl AsRef<Path>,
     schema_path: impl AsRef<Path>,
@@ -311,7 +363,6 @@ pub fn generate_config_doc(
         .unwrap_or_else(|e| panic!("Cannot parse {}: {e}", schema_path.display()));
 
     let mut doc = String::new();
-
     doc.push_str("# Configuration reference\n\n");
     doc.push_str(
         "> Generated from `config.toml` and `schema.toml` — do not edit this file directly.\n",
@@ -320,8 +371,6 @@ pub fn generate_config_doc(
     doc.push_str("> **Override any value** with an environment variable using `__` as the section separator:  \n");
     doc.push_str("> `AUTH__CLIENT_SECRET=prod-secret` overrides `[auth] client_secret`\n\n");
     doc.push_str("---\n\n");
-
-    // ── config.toml sections ─────────────────────────────────────────────
     doc.push_str("## Runtime config (`config.toml`)\n\n");
 
     if let toml::Value::Table(root) = &config {
@@ -332,7 +381,6 @@ pub fn generate_config_doc(
                 doc.push_str("| Key | Default | Description |\n");
                 doc.push_str("|-----|---------|-------------|\n");
 
-                // Collect real keys (skip __desc / __example annotations)
                 let keys: Vec<&String> = fields
                     .keys()
                     .filter(|k| !k.ends_with("__desc") && !k.ends_with("__example"))
@@ -348,7 +396,6 @@ pub fn generate_config_doc(
                     let example = fields
                         .get(&format!("{key}__example"))
                         .and_then(|v| v.as_str());
-
                     let mut cell = desc.to_string();
                     if let Some(ex) = example {
                         cell.push_str(&format!("<br>*e.g. `{ex}`*"));
@@ -361,7 +408,6 @@ pub fn generate_config_doc(
         }
     }
 
-    // ── schema.toml sections ─────────────────────────────────────────────
     doc.push_str("---\n\n");
     doc.push_str("## Schema (`schema.toml`)\n\n");
     doc.push_str("Defines the API record shape, DB target shape, and field mapping rules.  \n");
@@ -369,7 +415,6 @@ pub fn generate_config_doc(
         "`build.rs` generates all Rust structs and trait implementations from this file.\n\n",
     );
 
-    // Records
     for (record_name, def) in &schema.record {
         let kind = if def.fetcher.is_some() {
             "API source record"
@@ -377,18 +422,16 @@ pub fn generate_config_doc(
             "DB target record"
         };
         doc.push_str(&format!("### `[record.{record_name}]`  _{kind}_\n\n"));
-
         if let Some(ref fh) = def.fetcher {
             doc.push_str(&format!(
                 "Response envelope field: `{}`  \n",
                 fh.envelope_field
             ));
             if !fh.envelope_meta.is_empty() {
-                let meta_names: Vec<&str> =
-                    fh.envelope_meta.iter().map(|m| m.name.as_str()).collect();
+                let names: Vec<&str> = fh.envelope_meta.iter().map(|m| m.name.as_str()).collect();
                 doc.push_str(&format!(
                     "Envelope metadata fields: {}  \n",
-                    meta_names.join(", ")
+                    names.join(", ")
                 ));
             }
             doc.push('\n');
@@ -399,7 +442,6 @@ pub fn generate_config_doc(
                 sh.table, sh.primary_key, sh.upsert
             ));
         }
-
         doc.push_str("| Field | Type |\n");
         doc.push_str("|-------|------|\n");
         for f in &def.fields {
@@ -408,7 +450,6 @@ pub fn generate_config_doc(
         doc.push('\n');
     }
 
-    // Mappings
     doc.push_str("### Mapping rules\n\n");
     doc.push_str("| Rule | Input | Output | Effect |\n");
     doc.push_str("|------|-------|--------|--------|\n");
@@ -433,10 +474,8 @@ pub fn generate_config_doc(
         doc.push('\n');
     }
 
-    // Write to project root (next to config.toml, not in OUT_DIR)
     fs::write(out_path, &doc)
         .unwrap_or_else(|e| panic!("Cannot write {}: {e}", out_path.display()));
-
     println!("cargo:warning=Generated {}", out_path.display());
 }
 

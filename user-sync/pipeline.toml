@@ -1,19 +1,58 @@
 # user-sync/pipeline.toml
 #
-# Declares which assembled components run on which cron schedule.
-# Add a [[pipeline]] block to run additional schedules without any code change.
+# Fully declarative pipeline config.
+# This file + schema.toml is all a new sync job author writes.
+# No secrets live here — all sensitive values are env vars.
 
-[[pipeline]]
-name      = "global-user-sync"
-source    = "user-api"
-transform = "user"
-sink      = "postgres"
-cron      = "0 0 2 * * *"
+[pre_job.connections.db]
+type            = "postgres"
+url_env         = "SINK__DATABASE_URL"
+max_connections = 5
 
-# Example: weekly full backfill on Sundays at 03:00
-# [[pipeline]]
-# name      = "global-user-backfill"
-# source    = "user-api"
-# transform = "user"
-# sink      = "postgres"
-# cron      = "0 0 3 * * 0"
+[pre_job.connections.auth]
+type              = "oauth2_client_creds"
+token_url_env     = "AUTH__TOKEN_URL"
+client_id_env     = "AUTH__CLIENT_ID"
+client_secret_env = "AUTH__CLIENT_SECRET"
+
+[pre_job.connections.http]
+type           = "http"
+timeout_secs   = 620
+keepalive_secs = 30
+
+[main_job.iterator]
+type           = "date_window"
+start_env      = "SOURCE__START_INTERVAL"
+end_env        = "SOURCE__END_INTERVAL"
+limit_env      = "SOURCE__INTERVAL_LIMIT"
+sleep_secs_env = "SOURCE__WINDOW_SLEEP_SECS"
+
+[main_job.retry]
+max_attempts = 5
+backoff_secs = 2
+
+[main_job.fetch]
+type           = "http_json"
+endpoint_env   = "SOURCE__USER_ENDPOINT"
+auth           = "auth"
+realm_type_env = "SOURCE__INCLUDE_REALM_TYPES"
+
+[main_job.transform]
+mapping = "UserTransform"
+
+[main_job.sink]
+type  = "postgres_tx"
+db    = "db"
+model = "DbUser"
+
+[[post_job.steps]]
+type = "log_summary"
+
+[[post_job.steps]]
+type          = "raw_sql"
+db            = "db"
+sql_env       = "SINK__SYNC_SQL"
+skip_if_empty = true
+
+[scheduler]
+cron_env = "SCHEDULER__CRON"

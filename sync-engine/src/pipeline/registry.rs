@@ -53,7 +53,7 @@ pub struct PipelineEntry {
     pub cron: String,
 }
 
-// ── Registry ──────────────────────────────────────────────────────────────
+// ── Registry ─────────────────────────────────────────────────────────────
 
 #[derive(Default)]
 pub struct Registry {

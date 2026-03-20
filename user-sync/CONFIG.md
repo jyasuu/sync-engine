@@ -13,39 +13,39 @@
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `client_id` / `AUTH__CLIENT_ID` | `""` | OAuth2 client identifier. |
-| `client_secret` / `AUTH__CLIENT_SECRET` | `""` | OAuth2 client secret. Use AUTH__CLIENT_SECRET env var in production. |
-| `token_url` / `AUTH__TOKEN_URL` | `https://auth.example.com/oauth2/token` | OAuth2 token endpoint URL. |
+| `client_id` / `AUTH__CLIENT_ID` | `""` | OAuth2 client ID |
+| `client_secret` / `AUTH__CLIENT_SECRET` | `""` | OAuth2 client secret — set via AUTH__CLIENT_SECRET env var |
+| `token_url` / `AUTH__TOKEN_URL` | `""` | OAuth2 token endpoint<br>*e.g. `https://auth.example.com/oauth2/token`* |
 
 ### `[log]`
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `rust_log` / `LOG__RUST_LOG` | `user_sync=info` | tracing log filter. Levels: error < warn < info < debug<br>*e.g. `user_sync=debug  →  verbose | user_sync=warn  →  quiet`* |
+| `rust_log` / `LOG__RUST_LOG` | `info` | Tracing filter string passed to EnvFilter<br>*e.g. `user_sync=debug,sync_engine=debug`* |
 
 ### `[scheduler]`
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `cron` / `SCHEDULER__CRON` | `0 0 2 * * *` | 6-field cron expression (seconds first). When to run the sync.<br>*e.g. `0 0 2 * * *  → daily at 02:00 | */5 * * * * * → every 5 seconds`* |
+| `cron` / `SCHEDULER__CRON` | `0 */30 * * * *` | Cron expression for how often to run the job<br>*e.g. `0 0 2 * * *`* |
 
 ### `[sink]`
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `database_url` / `SINK__DATABASE_URL` | `postgres://user:password@localhost:5432/mydb` | PostgreSQL connection string. Use SINK__DATABASE_URL env var in production. |
-| `sync_sql` / `SINK__SYNC_SQL` | `""` | Optional SQL run once after every full sync cycle. Example: REFRESH MATERIALIZED VIEW mv_active_users; |
+| `database_url` / `SINK__DATABASE_URL` | `""` | Postgres connection string — set via SINK__DATABASE_URL env var |
+| `sync_sql` / `SINK__SYNC_SQL` | `""` | Optional SQL to run after each job completes<br>*e.g. `REFRESH MATERIALIZED VIEW user_summary`* |
 
 ### `[source]`
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `end_interval` / `SOURCE__END_INTERVAL` | `0` | Stop at this many days ago. 0 = today (inner boundary). |
-| `include_realm_types` / `SOURCE__INCLUDE_REALM_TYPES` | `""` | Comma-separated realm filter. Empty = all realms. |
-| `interval_limit` / `SOURCE__INTERVAL_LIMIT` | `7` | Maximum day-range per API call. Controls chunk size. |
-| `start_interval` / `SOURCE__START_INTERVAL` | `30` | Fetch users updated up to this many days ago (outer boundary). |
-| `user_endpoint` / `SOURCE__USER_ENDPOINT` | `https://user-service.example.com/api/users` | Base URL of the user API. |
-| `window_sleep_secs` / `SOURCE__WINDOW_SLEEP_SECS` | `60` | Seconds to sleep between windows. Set to 0 for testing. |
+| `end_interval` / `SOURCE__END_INTERVAL` | `0` | Days ago to end the last window (0 = today) |
+| `include_realm_types` / `SOURCE__INCLUDE_REALM_TYPES` | `""` | Optional realm_type query param value; leave empty to omit |
+| `interval_limit` / `SOURCE__INTERVAL_LIMIT` | `7` | Days covered per window |
+| `start_interval` / `SOURCE__START_INTERVAL` | `30` | Days ago to start the first window |
+| `user_endpoint` / `SOURCE__USER_ENDPOINT` | `""` | Base URL of the user API |
+| `window_sleep_secs` / `SOURCE__WINDOW_SLEEP_SECS` | `60` | Sleep between windows in seconds |
 
 ---
 
@@ -60,48 +60,47 @@ Table: `global_users` · Primary key: `pccuid` · Upsert: `true`
 
 | Field | Type |
 |-------|------|
-| `pccuid` | `i64` |
+| `pccuid` | `String` |
 | `sso_acct` | `String` |
-| `fact_no` | `Option<String>` |
-| `local_fact_no` | `Option<String>` |
-| `chinese_nm` | `Option<String>` |
-| `local_pnl_nm` | `Option<String>` |
-| `english_nm` | `Option<String>` |
+| `fact_no` | `String` |
+| `local_fact_no` | `String` |
+| `chinese_nm` | `String` |
+| `local_pnl_nm` | `String` |
+| `english_nm` | `String` |
 | `contact_mail` | `String` |
-| `sex` | `Option<String>` |
-| `lo_posi_nm` | `Option<String>` |
+| `sex` | `String` |
+| `lo_posi_nm` | `String` |
 | `disabled` | `String` |
 | `disabled_date` | `Option<DateTime<Utc>>` |
 | `update_date` | `DateTime<Utc>` |
-| `lo_dept_nm` | `Option<String>` |
+| `lo_dept_nm` | `String` |
 | `tel` | `String` |
-| `leave_mk` | `Option<String>` |
+| `leave_mk` | `String` |
 | `acct_type` | `String` |
 
 ### `[record.ApiUser]`  _API source record_
 
 Response envelope field: `data`  
-Envelope metadata fields: timestamp  
 
 | Field | Type |
 |-------|------|
-| `pccuid` | `i64` |
-| `sso_acct` | `String` |
-| `fact_no` | `Option<String>` |
-| `local_fact_no` | `Option<String>` |
-| `chinese_nm` | `Option<String>` |
-| `local_pnl_nm` | `Option<String>` |
-| `english_nm` | `Option<String>` |
-| `contact_mail` | `Option<String>` |
-| `sex` | `Option<String>` |
-| `lo_posi_nm` | `Option<String>` |
+| `pccuid` | `String` |
+| `ssoAcct` | `String` |
+| `factNo` | `String` |
+| `localFactNo` | `Option<String>` |
+| `chineseNm` | `Option<String>` |
+| `localPnlNm` | `Option<String>` |
+| `englishNm` | `Option<String>` |
+| `contactMail` | `Option<String>` |
+| `sex` | `Option<bool>` |
+| `loPosiNm` | `Option<String>` |
 | `disabled` | `bool` |
-| `disabled_date` | `Option<i64>` |
-| `update_date` | `i64` |
-| `lo_dept_nm` | `Option<String>` |
+| `disabledDate` | `Option<i64>` |
+| `updateDate` | `i64` |
+| `loDeptNm` | `Option<String>` |
 | `tel` | `Option<String>` |
-| `leave_mk` | `Option<String>` |
-| `acct_type` | `i64` |
+| `leaveMk` | `bool` |
+| `acctType` | `Option<String>` |
 
 ### Mapping rules
 
@@ -120,18 +119,18 @@ Envelope metadata fields: timestamp
 | `pccuid` | `copy` |
 | `sso_acct` | `copy` |
 | `fact_no` | `copy` |
-| `local_fact_no` | `copy` |
-| `chinese_nm` | `copy` |
-| `local_pnl_nm` | `copy` |
-| `english_nm` | `copy` |
+| `local_fact_no` | `null_to_empty` |
+| `chinese_nm` | `null_to_empty` |
+| `local_pnl_nm` | `null_to_empty` |
+| `english_nm` | `null_to_empty` |
 | `contact_mail` | `null_to_empty` |
-| `sex` | `copy` |
-| `lo_posi_nm` | `copy` |
+| `sex` | `option_bool_to_yn` |
+| `lo_posi_nm` | `null_to_empty` |
 | `disabled` | `bool_to_yn` |
 | `disabled_date` | `epoch_ms_to_ts` |
 | `update_date` | `epoch_ms_to_ts` |
-| `lo_dept_nm` | `copy` |
+| `lo_dept_nm` | `null_to_empty` |
 | `tel` | `null_to_empty` |
-| `leave_mk` | `copy` |
-| `acct_type` | `to_string` |
+| `leave_mk` | `bool_to_yn` |
+| `acct_type` | `null_to_empty` |
 

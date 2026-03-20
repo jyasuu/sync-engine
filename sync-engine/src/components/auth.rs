@@ -21,6 +21,7 @@ struct Cached {
     token: String,
     expires_at: i64,
 }
+
 impl Cached {
     fn is_expired(&self) -> bool {
         Utc::now().timestamp() >= self.expires_at - 60

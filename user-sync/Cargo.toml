@@ -23,6 +23,5 @@ reqwest              = { version = "0.12", features = ["json"] }
 tracing              = "0.1"
 tracing-subscriber   = { version = "0.3",  features = ["env-filter"] }
 
-# sync-engine used as build-dependency so build.rs can call sync_engine::codegen::generate()
 [build-dependencies]
 sync-engine = { path = "../sync-engine" }

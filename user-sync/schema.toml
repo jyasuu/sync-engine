@@ -1,54 +1,58 @@
+# user-sync/schema.toml
+#
+# Defines API source shape, DB target shape, and field mapping rules.
+# build.rs feeds this to sync_engine::codegen::generate() which emits:
+#   records.rs   — ApiUser, DbUser structs
+#   envelopes.rs — ApiUserResponse + HasEnvelope impl
+#   upserts.rs   — Upsertable (pool) + UpsertableInTx (tx) impls for DbUser
+#   transforms.rs — UserTransform struct + Transform impl
+
+# ── API response record ───────────────────────────────────────────────────
+
 [record.ApiUser]
-serde_rename = "snake_case"
+serde_rename = "camelCase"
 
 [record.ApiUser.fetcher]
 envelope_field = "data"
 
-# Extra fields present in the response envelope (outside the data array).
-# These are declared here so the generated Response struct is complete
-# and matches the actual API contract. Not used by the engine — dead_code allowed.
-[[record.ApiUser.fetcher.envelope_meta]]
-name = "timestamp"
-type = "i64"
-
 [[record.ApiUser.fields]]
 name = "pccuid"
-type = "i64"
-
-[[record.ApiUser.fields]]
-name = "sso_acct"
 type = "String"
 
 [[record.ApiUser.fields]]
-name = "fact_no"
+name = "ssoAcct"
+type = "String"
+
+[[record.ApiUser.fields]]
+name = "factNo"
+type = "String"
+
+[[record.ApiUser.fields]]
+name = "localFactNo"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
-name = "local_fact_no"
+name = "chineseNm"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
-name = "chinese_nm"
+name = "localPnlNm"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
-name = "local_pnl_nm"
+name = "englishNm"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
-name = "english_nm"
-type = "Option<String>"
-
-[[record.ApiUser.fields]]
-name = "contact_mail"
+name = "contactMail"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
 name = "sex"
-type = "Option<String>"
+type = "Option<bool>"
 
 [[record.ApiUser.fields]]
-name = "lo_posi_nm"
+name = "loPosiNm"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
@@ -56,15 +60,15 @@ name = "disabled"
 type = "bool"
 
 [[record.ApiUser.fields]]
-name = "disabled_date"
+name = "disabledDate"
 type = "Option<i64>"
 
 [[record.ApiUser.fields]]
-name = "update_date"
+name = "updateDate"
 type = "i64"
 
 [[record.ApiUser.fields]]
-name = "lo_dept_nm"
+name = "loDeptNm"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
@@ -72,24 +76,26 @@ name = "tel"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
-name = "leave_mk"
-type = "Option<String>"
+name = "leaveMk"
+type = "bool"
 
 [[record.ApiUser.fields]]
-name = "acct_type"
-type = "i64"
+name = "acctType"
+type = "Option<String>"
+
+# ── DB target record ──────────────────────────────────────────────────────
 
 [record.DbUser]
 
 [record.DbUser.sink]
 table       = "global_users"
 primary_key = "pccuid"
-extra_copy  = ["id = pccuid"]
 upsert      = true
+extra_copy  = ["id = pccuid"]
 
 [[record.DbUser.fields]]
 name = "pccuid"
-type = "i64"
+type = "String"
 
 [[record.DbUser.fields]]
 name = "sso_acct"
@@ -97,23 +103,23 @@ type = "String"
 
 [[record.DbUser.fields]]
 name = "fact_no"
-type = "Option<String>"
+type = "String"
 
 [[record.DbUser.fields]]
 name = "local_fact_no"
-type = "Option<String>"
+type = "String"
 
 [[record.DbUser.fields]]
 name = "chinese_nm"
-type = "Option<String>"
+type = "String"
 
 [[record.DbUser.fields]]
 name = "local_pnl_nm"
-type = "Option<String>"
+type = "String"
 
 [[record.DbUser.fields]]
 name = "english_nm"
-type = "Option<String>"
+type = "String"
 
 [[record.DbUser.fields]]
 name = "contact_mail"
@@ -121,11 +127,11 @@ type = "String"
 
 [[record.DbUser.fields]]
 name = "sex"
-type = "Option<String>"
+type = "String"
 
 [[record.DbUser.fields]]
 name = "lo_posi_nm"
-type = "Option<String>"
+type = "String"
 
 [[record.DbUser.fields]]
 name = "disabled"
@@ -141,7 +147,7 @@ type = "DateTime<Utc>"
 
 [[record.DbUser.fields]]
 name = "lo_dept_nm"
-type = "Option<String>"
+type = "String"
 
 [[record.DbUser.fields]]
 name = "tel"
@@ -149,11 +155,17 @@ type = "String"
 
 [[record.DbUser.fields]]
 name = "leave_mk"
-type = "Option<String>"
+type = "String"
 
 [[record.DbUser.fields]]
 name = "acct_type"
 type = "String"
+
+# ── Field mapping rules ───────────────────────────────────────────────────
+#
+# field  = target DbUser field name (snake_case)
+# source = source ApiUser field name (camelCase) — omit if identical to field
+# rule   = transformation rule
 
 [mapping.user]
 name = "UserTransform"
@@ -161,69 +173,82 @@ from = "ApiUser"
 to   = "DbUser"
 
 [[mapping.user.rules]]
-field = "pccuid"
-rule  = "copy"
+field  = "pccuid"
+rule   = "copy"
 
 [[mapping.user.rules]]
-field = "sso_acct"
-rule  = "copy"
+field  = "sso_acct"
+source = "ssoAcct"
+rule   = "copy"
 
 [[mapping.user.rules]]
-field = "fact_no"
-rule  = "copy"
+field  = "fact_no"
+source = "factNo"
+rule   = "copy"
 
 [[mapping.user.rules]]
-field = "local_fact_no"
-rule  = "copy"
+field  = "local_fact_no"
+source = "localFactNo"
+rule   = "null_to_empty"
 
 [[mapping.user.rules]]
-field = "chinese_nm"
-rule  = "copy"
+field  = "chinese_nm"
+source = "chineseNm"
+rule   = "null_to_empty"
 
 [[mapping.user.rules]]
-field = "local_pnl_nm"
-rule  = "copy"
+field  = "local_pnl_nm"
+source = "localPnlNm"
+rule   = "null_to_empty"
 
 [[mapping.user.rules]]
-field = "english_nm"
-rule  = "copy"
+field  = "english_nm"
+source = "englishNm"
+rule   = "null_to_empty"
 
 [[mapping.user.rules]]
-field = "contact_mail"
-rule  = "null_to_empty"
+field  = "contact_mail"
+source = "contactMail"
+rule   = "null_to_empty"
 
 [[mapping.user.rules]]
-field = "sex"
-rule  = "copy"
+field  = "sex"
+rule   = "option_bool_to_yn"
 
 [[mapping.user.rules]]
-field = "lo_posi_nm"
-rule  = "copy"
+field  = "lo_posi_nm"
+source = "loPosiNm"
+rule   = "null_to_empty"
 
 [[mapping.user.rules]]
-field = "disabled"
-rule  = "bool_to_yn"
+field  = "disabled"
+rule   = "bool_to_yn"
 
 [[mapping.user.rules]]
-field = "disabled_date"
-rule  = "epoch_ms_to_ts"
+field  = "disabled_date"
+source = "disabledDate"
+rule   = "epoch_ms_to_ts"
 
 [[mapping.user.rules]]
-field = "update_date"
-rule  = "epoch_ms_to_ts"
+field  = "update_date"
+source = "updateDate"
+rule   = "epoch_ms_to_ts"
 
 [[mapping.user.rules]]
-field = "lo_dept_nm"
-rule  = "copy"
+field  = "lo_dept_nm"
+source = "loDeptNm"
+rule   = "null_to_empty"
 
 [[mapping.user.rules]]
-field = "tel"
-rule  = "null_to_empty"
+field  = "tel"
+rule   = "null_to_empty"
 
 [[mapping.user.rules]]
-field = "leave_mk"
-rule  = "copy"
+field  = "leave_mk"
+source = "leaveMk"
+rule   = "bool_to_yn"
 
 [[mapping.user.rules]]
-field = "acct_type"
-rule  = "to_string"
+field  = "acct_type"
+source = "acctType"
+rule   = "null_to_empty"
