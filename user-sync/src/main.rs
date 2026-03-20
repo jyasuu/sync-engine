@@ -6,6 +6,7 @@ mod job;
 
 use anyhow::Result;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing_subscriber::EnvFilter;
 
@@ -19,19 +20,32 @@ async fn main() -> Result<()> {
     let cfg = AppConfig::from_env()?;
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(&cfg.log.rust_log)) // nested
+        .with_env_filter(EnvFilter::new(&cfg.log.rust_log))
         .init();
 
-    let cron = cfg.scheduler.cron.clone(); // nested
+    let cron = cfg.scheduler.cron.clone();
     let cfg_arc: Arc<AppConfig> = Arc::new(cfg);
     let cfg_for_log = Arc::clone(&cfg_arc);
+
+    // Mutex ensures only one job runs at a time — if a tick fires while
+    // the previous job is still running, it skips rather than stacking.
+    let lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 
     let mut scheduler = JobScheduler::new().await?;
 
     scheduler
         .add(Job::new_async(cron.as_str(), move |_, _| {
-            let cfg: Arc<AppConfig> = Arc::clone(&cfg_arc);
+            let cfg = Arc::clone(&cfg_arc);
+            let lock = Arc::clone(&lock);
             Box::pin(async move {
+                // try_lock: if already running, skip this tick
+                let _guard = match lock.try_lock() {
+                    Ok(g) => g,
+                    Err(_) => {
+                        tracing::warn!("Previous job still running — skipping this tick");
+                        return;
+                    }
+                };
                 if let Err(e) =
                     run_job::<UserSyncJob, JobConnections, AppConfig>(cfg.as_ref()).await
                 {

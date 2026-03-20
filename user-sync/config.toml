@@ -22,4 +22,4 @@ database_url = "postgres://user:password@localhost:5432/mydb"
 sync_sql     = ""
 
 [log]
-rust_log = "user_sync=info"
+rust_log = "user_sync=debug"

@@ -27,6 +27,7 @@ struct TokenResponse {
     expires_in: i64,
 }
 
+#[derive(Clone)]
 pub struct OAuth2Client {
     http: Client,
     token_url: String,
