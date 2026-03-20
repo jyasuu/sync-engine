@@ -90,7 +90,9 @@ impl DateWindowIter {
     /// sleep — useful when the previous window failed and you don't want
     /// to hold a lock for 60 s before moving on.
     pub async fn next_window_with_sleep(&mut self, do_sleep: bool) -> Option<(i64, i64)> {
+        tracing::debug!(cursor = self.cursor, end = self.end, "next_window called");
         if self.cursor <= self.end {
+            tracing::info!(cursor = self.cursor, end = self.end, "Iterator exhausted");
             return None;
         }
         if !self.first && do_sleep {
@@ -101,6 +103,7 @@ impl DateWindowIter {
         let window_end = (self.cursor - self.limit).max(self.end);
         let result = (self.cursor, window_end);
         self.cursor = window_end;
+        tracing::debug!(next_cursor = self.cursor, "Window yielded");
         Some(result)
     }
 }

@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
                 let _guard = match lock.try_lock() {
                     Ok(g) => g,
                     Err(_) => {
-                        tracing::warn!("Previous job still running — skipping this tick");
+                        tracing::debug!("Previous job still running — skipping this tick");
                         return;
                     }
                 };

@@ -35,6 +35,15 @@ pub struct RecordDef {
 #[derive(Debug, Deserialize)]
 pub struct FetcherHint {
     pub envelope_field: String,
+    #[serde(default)]
+    pub envelope_meta: Vec<EnvelopeMetaField>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EnvelopeMetaField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,16 +110,11 @@ fn gen_envelope(record_name: &str, hint: &FetcherHint) -> String {
     let mut out = String::new();
     writeln!(out, "#[allow(dead_code)]").unwrap();
     writeln!(out, "#[derive(Debug, serde::Deserialize)]").unwrap();
-    writeln!(out, "#[allow(dead_code)]").unwrap();
-    writeln!(
-        out,
-        "#[allow(dead_code)]
-pub struct {record_name}Response {{"
-    )
-    .unwrap();
-    writeln!(out, "    pub timestamp:   i64,").unwrap();
-    writeln!(out, "    pub status_code: i64,").unwrap();
-    writeln!(out, "    pub {field}:     Vec<{record_name}>,").unwrap();
+    writeln!(out, "pub struct {record_name}Response {{").unwrap();
+    for meta in &hint.envelope_meta {
+        writeln!(out, "    pub {}: {},", meta.name, meta.ty).unwrap();
+    }
+    writeln!(out, "    pub {field}: Vec<{record_name}>,").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(
         out,

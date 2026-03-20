@@ -36,8 +36,13 @@ pub struct SourceConfig {
     pub start_interval: i64,
     pub end_interval: i64,
     pub interval_limit: i64,
+    #[serde(default = "default_window_sleep")]
+    pub window_sleep_secs: u64,
     #[serde(default)]
     pub include_realm_types: String,
+}
+fn default_window_sleep() -> u64 {
+    60
 }
 
 #[derive(Debug, Clone, Deserialize)]

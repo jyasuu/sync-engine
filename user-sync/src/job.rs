@@ -35,9 +35,11 @@ impl MainJob for UserSyncJob {
             cfg.source.end_interval,
             cfg.source.interval_limit,
         );
+        iter.sleep = std::time::Duration::from_secs(cfg.source.window_sleep_secs);
 
         let mut last_window_ok = true;
 
+        tracing::debug!("Starting window iteration loop");
         while let Some((start, end)) = iter.next_window_with_sleep(last_window_ok).await {
             summary.windows_processed += 1;
             tracing::info!(start, end, "Processing window");

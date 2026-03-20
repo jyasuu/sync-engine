@@ -10,6 +10,7 @@ user_endpoint        = "https://user-service.example.com/api/users"
 start_interval       = 30
 end_interval         = 0
 interval_limit       = 7
+window_sleep_secs    = 60
 include_realm_types  = ""
 
 [auth]

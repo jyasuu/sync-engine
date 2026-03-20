@@ -4,6 +4,13 @@ serde_rename = "snake_case"
 [record.ApiUser.fetcher]
 envelope_field = "data"
 
+# Extra fields present in the response envelope (outside the data array).
+# These are declared here so the generated Response struct is complete
+# and matches the actual API contract. Not used by the engine — dead_code allowed.
+[[record.ApiUser.fetcher.envelope_meta]]
+name = "timestamp"
+type = "i64"
+
 [[record.ApiUser.fields]]
 name = "pccuid"
 type = "i64"
