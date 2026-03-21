@@ -16,7 +16,7 @@
 //   timeout  = "620"                         # literal — no env lookup
 //   label    = { env = "JOB_LABEL", default = "unnamed" }
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]

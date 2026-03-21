@@ -1,12 +1,9 @@
 // user-sync/src/main.rs
 //
-// Scheduler wiring, mutex-skip, and signal handling are now in the engine.
-// This file loads config and calls run_job on each cron tick.
-//
-// To go fully zero-code and drive everything from pipeline.toml, see the
-// commented-out alternative at the bottom.
+// Loads pipeline.toml, parses it into PipelineConfig, and drives the
+// scheduled job. The cron expression, all connections, and all step wiring
+// come from pipeline.toml — this file never needs to change.
 
-mod config;
 mod generated;
 mod job;
 
@@ -14,26 +11,35 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
-use tracing_subscriber::EnvFilter;
 
-use config::AppConfig;
 use job::UserSyncJob;
-use sync_engine::run_job;
+use sync_engine::{pipeline_runner::PipelineConfig, run_job};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cfg = AppConfig::from_env()?;
+    dotenvy::dotenv().ok();
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(&cfg.log.rust_log))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .init();
 
-    let cron = cfg.scheduler.cron.clone();
-    let cfg_arc = Arc::new(cfg);
-    let cfg_for_log = Arc::clone(&cfg_arc);
+    let raw = std::fs::read_to_string("pipeline.toml").expect("Cannot read pipeline.toml");
+    let pipeline_cfg: PipelineConfig = toml::from_str(&raw).expect("Cannot parse pipeline.toml");
+
+    let cron = pipeline_cfg
+        .scheduler
+        .cron
+        .resolve()
+        .expect("SCHEDULER__CRON not set");
+
+    let cfg_arc = Arc::new(pipeline_cfg);
     let lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 
     let mut scheduler = JobScheduler::new().await?;
+
     scheduler
         .add(Job::new_async(cron.as_str(), move |_, _| {
             let cfg = Arc::clone(&cfg_arc);
@@ -54,29 +60,8 @@ async fn main() -> Result<()> {
         .await?;
 
     scheduler.start().await?;
-    tracing::info!("user-sync scheduled ({})", cfg_for_log.scheduler.cron);
+    tracing::info!("user-sync scheduled ({})", cron);
     tokio::signal::ctrl_c().await?;
     scheduler.shutdown().await?;
     Ok(())
 }
-
-// ── Alternative: fully pipeline.toml-driven (no AppConfig needed) ─────────
-//
-// #[tokio::main]
-// async fn main() -> anyhow::Result<()> {
-//     dotenvy::dotenv().ok();
-//     tracing_subscriber::fmt()
-//         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-//         .init();
-//
-//     sync_engine::run_from_pipeline_toml(
-//         "pipeline.toml",
-//         |_cx, _cfg| async move {
-//             // With the fully dynamic path the job type parameters are resolved
-//             // inside run_from_pipeline_toml via the registered component names.
-//             // For the typed path keep using run_job::<UserSyncJob,_,_> above.
-//             Ok(())
-//         },
-//     )
-//     .await
-// }

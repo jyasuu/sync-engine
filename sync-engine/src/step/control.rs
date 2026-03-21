@@ -162,17 +162,12 @@ impl Step for DrainQueueStep {
         consumer.handle.await.ok();
         info!(queue = %self.queue, "Consumer task joined");
 
-        // If DrainInPostJob mode: collect accumulated items and commit.
+        // If DrainInPostJob mode: the consumer task already accumulated and
+        // committed items internally. This step just ensures the handle is
+        // joined before post_job proceeds.
         let rx_slot = format!("__accum_rx_{}", self.queue);
         if ctx.slot_is_set(&rx_slot).await {
-            use tokio::sync::oneshot;
-            type Rx = oneshot::Receiver<Vec<Box<dyn std::any::Any + Send>>>;
-
-            // We stored the receiver as a generic type; retrieve and await it.
-            // The generic Vec<T> is erased at this point — the commit was
-            // already handled inside the consumer task for DrainInPostJob.
-            // This step just ensures the handle is joined and logs completion.
-            info!(queue = %self.queue, "Accumulated items committed by consumer task");
+            info!(queue = %self.queue, "Accumulated items handled by consumer task");
         }
 
         Ok(())

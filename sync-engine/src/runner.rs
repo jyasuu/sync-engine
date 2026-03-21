@@ -17,7 +17,7 @@ use tracing::{error, info, warn};
 
 use crate::context::{JobContext, WindowMeta};
 use crate::job::JobSummary;
-use crate::step::{Step, StepRunner};
+use crate::step::StepRunner;
 
 pub struct WindowConfig {
     pub start_interval: i64,

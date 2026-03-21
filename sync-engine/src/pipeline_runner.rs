@@ -1,16 +1,16 @@
 // sync-engine/src/pipeline_runner.rs
 //
-// StandardConnections — builds pool + auth + http from env vars declared in
-//   pipeline.toml; no hand-written connections.rs needed in business crates.
+// Parses the new pipeline.toml format (step-based, ConfigValue-aware) and
+// assembles a JobContext + MainJobRunner ready to execute.
 //
-// run_from_pipeline_toml — reads pipeline.toml, wires cron + mutex-skip,
-//   calls the user-supplied job factory on each tick.
-//   main.rs in a business crate becomes a single call to this function.
+// run_from_pipeline_toml — the single entry-point for a business crate's
+// main.rs. Reads pipeline.toml, builds everything, wires the cron scheduler
+// with mutex-skip, and drives run_job on each tick.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde::Deserialize;
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -20,251 +20,17 @@ use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::info;
 
 use crate::components::auth::OAuth2Auth;
-use crate::job::{Connections, JobSummary};
-use crate::standard_job::HasConnections;
+use crate::config_value::ConfigValue;
+use crate::context::{Connections, JobContext};
+use crate::job::JobSummary;
+use crate::runner::WindowConfig;
+use crate::slot::SlotScope;
 
-// ── TOML schema ───────────────────────────────────────────────────────────
+// ── Re-export for backwards compat ────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-pub struct PipelineConfig {
-    pub pre_job: PreJobConfig,
-    pub main_job: MainJobConfig,
-    pub post_job: PostJobConfig,
-    pub scheduler: SchedulerConfig,
-}
+pub use crate::context::Connections as StandardConnections;
 
-#[derive(Debug, Deserialize)]
-pub struct PreJobConfig {
-    pub connections: ConnectionsConfig,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ConnectionsConfig {
-    pub db: DbConnectionConfig,
-    pub auth: AuthConnectionConfig,
-    pub http: HttpConnectionConfig,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DbConnectionConfig {
-    pub url_env: String,
-    #[serde(default = "default_max_connections")]
-    pub max_connections: u32,
-}
-fn default_max_connections() -> u32 {
-    5
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AuthConnectionConfig {
-    pub token_url_env: String,
-    pub client_id_env: String,
-    pub client_secret_env: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct HttpConnectionConfig {
-    #[serde(default = "default_http_timeout")]
-    pub timeout_secs: u64,
-    #[serde(default = "default_keepalive")]
-    pub keepalive_secs: u64,
-}
-fn default_http_timeout() -> u64 {
-    620
-}
-fn default_keepalive() -> u64 {
-    30
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MainJobConfig {
-    pub iterator: IteratorConfig,
-    pub retry: RetryConfig,
-    pub fetch: FetchConfig,
-    pub transform: TransformConfig,
-    pub sink: SinkConfig,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct IteratorConfig {
-    pub r#type: String,
-    pub start_env: String,
-    pub end_env: String,
-    pub limit_env: String,
-    pub sleep_secs_env: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RetryConfig {
-    #[serde(default = "default_max_attempts")]
-    pub max_attempts: usize,
-    #[serde(default = "default_backoff_secs")]
-    pub backoff_secs: u64,
-}
-fn default_max_attempts() -> usize {
-    5
-}
-fn default_backoff_secs() -> u64 {
-    2
-}
-
-#[derive(Debug, Deserialize)]
-pub struct FetchConfig {
-    pub r#type: String,
-    pub endpoint_env: String,
-    pub auth: String,
-    #[serde(default)]
-    pub static_query: Vec<(String, String)>,
-    #[serde(default)]
-    pub realm_type_env: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TransformConfig {
-    /// Name of the generated Transform struct (for docs / validation).
-    pub mapping: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SinkConfig {
-    pub r#type: String,
-    pub db: String,
-    /// Name of the generated UpsertableInTx struct (for docs / validation).
-    pub model: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PostJobConfig {
-    pub steps: Vec<PostStepConfig>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum PostStepConfig {
-    LogSummary,
-    RawSql {
-        db: String,
-        sql_env: String,
-        #[serde(default)]
-        skip_if_empty: bool,
-    },
-    Custom {
-        hook: String,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SchedulerConfig {
-    pub cron_env: String,
-}
-
-// ── StandardConnections ───────────────────────────────────────────────────
-
-/// Built from `[pre_job.connections]` in pipeline.toml.
-/// No hand-written connections.rs required in business crates.
-pub struct StandardConnections {
-    pub db: PgPool,
-    pub auth: OAuth2Auth,
-    pub http: Client,
-    pub endpoint: String,
-    pub extra_query: Vec<(String, String)>,
-}
-
-impl Connections for StandardConnections {}
-
-impl HasConnections for StandardConnections {
-    fn db_pool(&self) -> &PgPool {
-        &self.db
-    }
-    fn auth(&self) -> &OAuth2Auth {
-        &self.auth
-    }
-    fn http_client(&self) -> &Client {
-        &self.http
-    }
-    fn endpoint(&self) -> &str {
-        &self.endpoint
-    }
-    fn extra_query(&self) -> Vec<(String, String)> {
-        self.extra_query.clone()
-    }
-}
-
-impl StandardConnections {
-    pub async fn from_pipeline(cfg: &PipelineConfig) -> Result<Self> {
-        let db_url = std::env::var(&cfg.pre_job.connections.db.url_env)
-            .with_context(|| format!("env var {} not set", cfg.pre_job.connections.db.url_env))?;
-
-        info!("pre_job: connecting to postgres");
-        let db = PgPoolOptions::new()
-            .max_connections(cfg.pre_job.connections.db.max_connections)
-            .connect(&db_url)
-            .await
-            .context("Postgres connect failed")?;
-
-        let http = Client::builder()
-            .timeout(Duration::from_secs(
-                cfg.pre_job.connections.http.timeout_secs,
-            ))
-            .tcp_keepalive(Duration::from_secs(
-                cfg.pre_job.connections.http.keepalive_secs,
-            ))
-            .build()
-            .context("HTTP client build failed")?;
-
-        let token_url =
-            std::env::var(&cfg.pre_job.connections.auth.token_url_env).with_context(|| {
-                format!(
-                    "env var {} not set",
-                    cfg.pre_job.connections.auth.token_url_env
-                )
-            })?;
-        let client_id =
-            std::env::var(&cfg.pre_job.connections.auth.client_id_env).with_context(|| {
-                format!(
-                    "env var {} not set",
-                    cfg.pre_job.connections.auth.client_id_env
-                )
-            })?;
-        let client_secret = std::env::var(&cfg.pre_job.connections.auth.client_secret_env)
-            .with_context(|| {
-                format!(
-                    "env var {} not set",
-                    cfg.pre_job.connections.auth.client_secret_env
-                )
-            })?;
-
-        info!("pre_job: creating oauth2 client");
-        let auth = OAuth2Auth::new(http.clone(), token_url, client_id, client_secret);
-
-        let endpoint = std::env::var(&cfg.main_job.fetch.endpoint_env)
-            .with_context(|| format!("env var {} not set", cfg.main_job.fetch.endpoint_env))?;
-
-        let mut extra_query = cfg.main_job.fetch.static_query.clone();
-        if let Some(ref env_key) = cfg.main_job.fetch.realm_type_env {
-            if let Ok(v) = std::env::var(env_key) {
-                if !v.is_empty() {
-                    extra_query.push(("realm_type".to_owned(), v));
-                }
-            }
-        }
-
-        info!("pre_job: all connections ready");
-        Ok(Self {
-            db,
-            auth,
-            http,
-            endpoint,
-            extra_query,
-        })
-    }
-}
-
-// ── ResolvedIteratorCfg ───────────────────────────────────────────────────
-
-/// Resolved at startup from `[main_job.iterator]` env vars.
-/// Implements `HasIteratorCfg` and `HasRetryCfg` so it can be passed
-/// directly to `StandardJob`.
+/// Config struct that satisfies the old HasIteratorCfg / HasRetryCfg traits.
 pub struct ResolvedIteratorCfg {
     pub start_interval: i64,
     pub end_interval: i64,
@@ -272,32 +38,6 @@ pub struct ResolvedIteratorCfg {
     pub window_sleep_secs: u64,
     pub max_attempts: usize,
     pub base_backoff_secs: u64,
-}
-
-impl ResolvedIteratorCfg {
-    pub fn from_pipeline(cfg: &PipelineConfig) -> Result<Self> {
-        fn get_i64(env: &str) -> Result<i64> {
-            std::env::var(env)
-                .with_context(|| format!("env var {env} not set"))?
-                .parse::<i64>()
-                .with_context(|| format!("env var {env} must be an integer"))
-        }
-        fn get_u64(env: &str) -> Result<u64> {
-            std::env::var(env)
-                .with_context(|| format!("env var {env} not set"))?
-                .parse::<u64>()
-                .with_context(|| format!("env var {env} must be a non-negative integer"))
-        }
-        let iter = &cfg.main_job.iterator;
-        Ok(Self {
-            start_interval: get_i64(&iter.start_env)?,
-            end_interval: get_i64(&iter.end_env)?,
-            interval_limit: get_i64(&iter.limit_env)?,
-            window_sleep_secs: get_u64(&iter.sleep_secs_env)?,
-            max_attempts: cfg.main_job.retry.max_attempts,
-            base_backoff_secs: cfg.main_job.retry.backoff_secs,
-        })
-    }
 }
 
 impl crate::standard_job::HasIteratorCfg for ResolvedIteratorCfg {
@@ -314,7 +54,6 @@ impl crate::standard_job::HasIteratorCfg for ResolvedIteratorCfg {
         self.window_sleep_secs
     }
 }
-
 impl crate::standard_job::HasRetryCfg for ResolvedIteratorCfg {
     fn max_attempts(&self) -> usize {
         self.max_attempts
@@ -324,17 +63,213 @@ impl crate::standard_job::HasRetryCfg for ResolvedIteratorCfg {
     }
 }
 
-// ── PostJobExecutor ───────────────────────────────────────────────────────
+// ── TOML schema ───────────────────────────────────────────────────────────
 
-type HookFn = Box<
-    dyn Fn(JobSummary) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync,
->;
+#[derive(Debug, Deserialize)]
+pub struct PipelineConfig {
+    pub job: Option<JobMeta>,
+    pub slots: Option<HashMap<String, SlotDef>>,
+    pub pre_job: PreJobConfig,
+    pub main_job: MainJobConfig,
+    pub post_job: PostJobConfig,
+    pub scheduler: SchedulerConfig,
+}
 
-/// Executes the post_job steps declared in pipeline.toml.
-/// Custom hooks are registered by the business crate before calling run.
+#[derive(Debug, Deserialize)]
+pub struct JobMeta {
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SlotDef {
+    pub scope: SlotScopeStr,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotScopeStr {
+    Window,
+    Job,
+    Pipeline,
+}
+
+impl From<SlotScopeStr> for SlotScope {
+    fn from(s: SlotScopeStr) -> Self {
+        match s {
+            SlotScopeStr::Window => SlotScope::Window,
+            SlotScopeStr::Job => SlotScope::Job,
+            SlotScopeStr::Pipeline => SlotScope::Pipeline,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PreJobConfig {
+    pub steps: Vec<PreStepConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PreStepConfig {
+    PgConnect {
+        url: ConfigValue,
+        #[serde(default = "default_max_conn")]
+        max_connections: u32,
+    },
+    Oauth2 {
+        token_url: ConfigValue,
+        client_id: ConfigValue,
+        client_secret: ConfigValue,
+    },
+    HttpClient {
+        #[serde(default = "default_timeout")]
+        timeout_secs: u64,
+        #[serde(default = "default_keepalive")]
+        keepalive_secs: u64,
+    },
+    SpawnConsumer {
+        queue: String,
+        model: String,
+        commit_mode: CommitModeStr,
+        accum_slot: Option<String>,
+        #[serde(default = "default_queue_cap")]
+        capacity: usize,
+    },
+    RegisterQueue {
+        name: String,
+        #[serde(default = "default_queue_cap")]
+        capacity: usize,
+    },
+}
+
+fn default_max_conn() -> u32 {
+    5
+}
+fn default_timeout() -> u64 {
+    620
+}
+fn default_keepalive() -> u64 {
+    30
+}
+fn default_queue_cap() -> usize {
+    256
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitModeStr {
+    PerBatch,
+    DrainInPostJob,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MainJobConfig {
+    pub iterator: IteratorConfig,
+    pub retry: RetryConfig,
+    pub retry_steps: Vec<MainStepConfig>,
+    #[serde(default)]
+    pub post_window_steps: Vec<MainStepConfig>,
+    #[serde(default)]
+    pub post_loop_steps: Vec<MainStepConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IteratorConfig {
+    pub start_interval: ConfigValue,
+    pub end_interval: ConfigValue,
+    pub interval_limit: ConfigValue,
+    pub sleep_secs: ConfigValue,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RetryConfig {
+    #[serde(default = "default_attempts")]
+    pub max_attempts: usize,
+    #[serde(default = "default_backoff")]
+    pub backoff_secs: u64,
+}
+fn default_attempts() -> usize {
+    5
+}
+fn default_backoff() -> u64 {
+    2
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MainStepConfig {
+    FetchJson {
+        endpoint: ConfigValue,
+        #[serde(default)]
+        realm_type: Option<ConfigValue>,
+        writes: String,
+        #[serde(default)]
+        append: bool,
+    },
+    Transform {
+        reads: String,
+        writes: String,
+        mapper: String,
+        #[serde(default)]
+        append: bool,
+    },
+    TxUpsert {
+        reads: String,
+        model: String,
+    },
+    SendToQueue {
+        reads: String,
+        queue: String,
+    },
+    Sleep {
+        secs: ConfigValue,
+    },
+    RawSql {
+        sql: ConfigValue,
+        #[serde(default)]
+        skip_if_empty: bool,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PostJobConfig {
+    pub steps: Vec<PostStepConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PostStepConfig {
+    LogSummary,
+    RawSql {
+        sql: ConfigValue,
+        #[serde(default)]
+        skip_if_empty: bool,
+    },
+    DrainQueue {
+        queue: String,
+    },
+    Custom {
+        hook: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SchedulerConfig {
+    pub cron: ConfigValue,
+}
+
+// ── PostJobExecutor (kept for custom hooks) ───────────────────────────────
+
 pub struct PostJobExecutor {
-    steps: Vec<PostStepConfig>,
-    custom_hooks: HashMap<String, HookFn>,
+    pub steps: Vec<PostStepConfig>,
+    pub custom_hooks: HashMap<
+        String,
+        Box<
+            dyn Fn(JobSummary) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send>>
+                + Send
+                + Sync,
+        >,
+    >,
 }
 
 impl PostJobExecutor {
@@ -344,8 +279,6 @@ impl PostJobExecutor {
             custom_hooks: HashMap::new(),
         }
     }
-
-    /// Register a named custom post-job hook.
     pub fn register_hook<F, Fut>(&mut self, name: &str, f: F)
     where
         F: Fn(JobSummary) -> Fut + Send + Sync + 'static,
@@ -354,101 +287,205 @@ impl PostJobExecutor {
         self.custom_hooks
             .insert(name.to_owned(), Box::new(move |s| Box::pin(f(s))));
     }
+}
 
-    pub async fn run(&self, summary: JobSummary, cx: &StandardConnections) -> Result<()> {
-        info!(
-            windows = summary.windows_processed,
-            fetched = summary.records_fetched,
-            upserted = summary.records_upserted,
-            skipped = summary.records_skipped,
-            errors = summary.errors.len(),
-            "Job complete"
-        );
-        for err in &summary.errors {
-            tracing::warn!(error = %err, "Recorded error");
-        }
+// ── Context builder ───────────────────────────────────────────────────────
 
-        for step in &self.steps {
-            match step {
-                PostStepConfig::LogSummary => { /* already logged above */ }
+/// Build a JobContext from the [pre_job] section of pipeline.toml.
+/// Establishes connections and declares slots.
+pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
+    let job_name = cfg
+        .job
+        .as_ref()
+        .and_then(|j| j.name.as_deref())
+        .unwrap_or("unnamed")
+        .to_owned();
 
-                PostStepConfig::RawSql {
-                    sql_env,
-                    skip_if_empty,
-                    ..
-                } => {
-                    let sql = std::env::var(sql_env).unwrap_or_default();
-                    if sql.trim().is_empty() && *skip_if_empty {
-                        continue;
-                    }
-                    info!("post_job: running raw SQL");
-                    sqlx::raw_sql(&sql)
-                        .execute(&cx.db)
-                        .await
-                        .context("Post-sync SQL failed")?;
-                }
+    // ── Resolve connections from pre_job steps ────────────────────────────
+    let mut db_pool: Option<sqlx::PgPool> = None;
+    let mut auth_opt: Option<Arc<OAuth2Auth>> = None;
+    let mut endpoint_str = String::new();
+    let mut extra_query: Vec<(String, String)> = Vec::new();
 
-                PostStepConfig::Custom { hook } => {
-                    let f = self
-                        .custom_hooks
-                        .get(hook)
-                        .with_context(|| format!("No custom hook registered for \"{hook}\""))?;
-                    f(JobSummary::default()).await?;
-                }
+    // Build http first (needed for oauth2)
+    let http = {
+        let mut timeout_secs = 620u64;
+        let mut keepalive_secs = 30u64;
+        for step in &cfg.pre_job.steps {
+            if let PreStepConfig::HttpClient {
+                timeout_secs: t,
+                keepalive_secs: k,
+            } = step
+            {
+                timeout_secs = *t;
+                keepalive_secs = *k;
             }
         }
-        Ok(())
+        Client::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .tcp_keepalive(Duration::from_secs(keepalive_secs))
+            .build()
+            .context("HTTP client build failed")?
+    };
+
+    for step in &cfg.pre_job.steps {
+        match step {
+            PreStepConfig::PgConnect {
+                url,
+                max_connections,
+            } => {
+                let url_str = url.resolve()?;
+                info!("pre_job: connecting to postgres");
+                db_pool = Some(
+                    PgPoolOptions::new()
+                        .max_connections(*max_connections)
+                        .connect(&url_str)
+                        .await
+                        .context("Postgres connect failed")?,
+                );
+            }
+            PreStepConfig::Oauth2 {
+                token_url,
+                client_id,
+                client_secret,
+            } => {
+                info!("pre_job: creating oauth2 client");
+                auth_opt = Some(Arc::new(OAuth2Auth::new(
+                    http.clone(),
+                    token_url.resolve()?,
+                    client_id.resolve()?,
+                    client_secret.resolve()?,
+                )));
+            }
+            PreStepConfig::HttpClient { .. } => { /* already handled above */ }
+            _ => { /* queues + consumers handled after context is built */ }
+        }
     }
+
+    // Resolve endpoint from main_job fetch step
+    for step in &cfg.main_job.retry_steps {
+        if let MainStepConfig::FetchJson {
+            endpoint,
+            realm_type,
+            ..
+        } = step
+        {
+            endpoint_str = endpoint.resolve()?;
+            if let Some(rt) = realm_type {
+                let v = rt.resolve().unwrap_or_default();
+                if !v.is_empty() {
+                    extra_query.push(("realm_type".to_owned(), v));
+                }
+            }
+            break;
+        }
+    }
+
+    let db = db_pool.ok_or_else(|| anyhow!("No pg_connect step in pre_job"))?;
+    let auth = auth_opt.ok_or_else(|| anyhow!("No oauth2 step in pre_job"))?;
+
+    let connections = Connections {
+        db,
+        auth,
+        http,
+        endpoint: endpoint_str,
+        extra_query,
+    };
+
+    // ── Config map (resolved iterator values) ─────────────────────────────
+    let iter = &cfg.main_job.iterator;
+    let mut config = HashMap::new();
+    config.insert(
+        "iterator.start_interval".to_owned(),
+        iter.start_interval.resolve()?,
+    );
+    config.insert(
+        "iterator.end_interval".to_owned(),
+        iter.end_interval.resolve()?,
+    );
+    config.insert(
+        "iterator.interval_limit".to_owned(),
+        iter.interval_limit.resolve()?,
+    );
+    config.insert("iterator.sleep_secs".to_owned(), iter.sleep_secs.resolve()?);
+
+    let ctx = Arc::new(JobContext::new(connections, config, job_name));
+
+    // ── Declare slots ─────────────────────────────────────────────────────
+    if let Some(slots) = &cfg.slots {
+        let mut slot_map = ctx.slots.write().await;
+        for (key, def) in slots {
+            let scope: SlotScope = match def.scope {
+                SlotScopeStr::Window => SlotScope::Window,
+                SlotScopeStr::Job => SlotScope::Job,
+                SlotScopeStr::Pipeline => SlotScope::Pipeline,
+            };
+            slot_map.declare(key, scope);
+        }
+    }
+
+    // ── Register queues ───────────────────────────────────────────────────
+    for step in &cfg.pre_job.steps {
+        match step {
+            PreStepConfig::RegisterQueue { name, capacity } => {
+                ctx.register_queue(name, *capacity).await;
+            }
+            PreStepConfig::SpawnConsumer {
+                queue, capacity, ..
+            } => {
+                ctx.register_queue(queue, *capacity).await;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(ctx)
+}
+
+/// Build window config from the parsed iterator + retry sections.
+pub fn build_window_cfg(cfg: &PipelineConfig) -> Result<WindowConfig> {
+    let iter = &cfg.main_job.iterator;
+    Ok(WindowConfig {
+        start_interval: iter.start_interval.resolve_as::<i64>()?,
+        end_interval: iter.end_interval.resolve_as::<i64>()?,
+        interval_limit: iter.interval_limit.resolve_as::<i64>()?,
+        sleep_secs: iter.sleep_secs.resolve_as::<u64>()?,
+        max_attempts: cfg.main_job.retry.max_attempts,
+        base_backoff_secs: cfg.main_job.retry.backoff_secs,
+    })
 }
 
 // ── run_from_pipeline_toml ────────────────────────────────────────────────
 
 /// Single entry-point for a business crate's main.rs.
 ///
-/// Reads `pipeline.toml`, validates env vars, wires the cron scheduler
-/// (with mutex-skip so concurrent runs are prevented), and calls
-/// `job_factory` on each tick.
+/// The `job_factory` receives the parsed config and a pre-built `Arc<JobContext>`
+/// and returns a future that drives one full job execution.
 ///
-/// Example `main.rs`:
-///
-/// ```rust,no_run
-/// #[tokio::main]
-/// async fn main() -> anyhow::Result<()> {
-///     sync_engine::run_from_pipeline_toml(
-///         "pipeline.toml",
-///         |cx, cfg| async move {
-///             sync_engine::run_job::<MyJob, _, _>(cfg.as_ref()).await
-///         },
-///     ).await
-/// }
-/// ```
+/// For the simple typed path (StandardJob), use the convenience wrapper
+/// `run_typed_from_pipeline_toml` below.
 pub async fn run_from_pipeline_toml<F, Fut>(path: &str, job_factory: F) -> Result<()>
 where
-    F: Fn(Arc<StandardConnections>, Arc<ResolvedIteratorCfg>) -> Fut
-        + Send
-        + Sync
-        + Clone
-        + 'static,
+    F: Fn(Arc<PipelineConfig>, Arc<JobContext>) -> Fut + Send + Sync + Clone + 'static,
     Fut: Future<Output = Result<()>> + Send + 'static,
 {
     let raw = std::fs::read_to_string(path).with_context(|| format!("Cannot read {path}"))?;
     let pipeline_cfg: PipelineConfig =
         toml::from_str(&raw).with_context(|| format!("Cannot parse {path}"))?;
 
-    let cron = std::env::var(&pipeline_cfg.scheduler.cron_env)
-        .with_context(|| format!("env var {} not set", pipeline_cfg.scheduler.cron_env))?;
+    let cron = pipeline_cfg.scheduler.cron.resolve()?;
+    let cfg = Arc::new(pipeline_cfg);
 
-    info!("Building connections from pipeline config");
-    let cx = Arc::new(StandardConnections::from_pipeline(&pipeline_cfg).await?);
-    let iter_cfg = Arc::new(ResolvedIteratorCfg::from_pipeline(&pipeline_cfg)?);
+    // Build context once per scheduler lifecycle (Pipeline-scoped slots persist)
+    let ctx = build_context(&cfg).await?;
 
     let lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
     let mut scheduler = JobScheduler::new().await?;
 
     scheduler
         .add(Job::new_async(cron.as_str(), move |_, _| {
-            let cx = Arc::clone(&cx);
-            let cfg = Arc::clone(&iter_cfg);
+            let cfg = Arc::clone(&cfg);
+            let ctx = Arc::clone(&ctx);
             let lock = Arc::clone(&lock);
             let factory = job_factory.clone();
             Box::pin(async move {
@@ -459,7 +496,7 @@ where
                         return;
                     }
                 };
-                if let Err(e) = factory(cx, cfg).await {
+                if let Err(e) = factory(cfg, ctx).await {
                     tracing::error!(error = %e, "Job failed");
                 }
             })

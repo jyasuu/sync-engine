@@ -3,11 +3,8 @@
 // Pre-job setup steps. These run once before main_job starts.
 // They populate ctx.connections and declare slots in ctx.slots.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
-use sqlx::postgres::PgPoolOptions;
-use std::sync::Arc;
-use std::time::Duration;
 
 use crate::context::JobContext;
 use crate::slot::SlotScope;

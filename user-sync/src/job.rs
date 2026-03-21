@@ -1,139 +1,106 @@
 // user-sync/src/job.rs
 //
-// Before: ~130 lines of manual fetch/transform/tx/upsert/retry loop.
-// After:  PreJob wires StandardConnections; MainJob delegates to StandardJob;
-//         PostJob is the only custom logic that remains.
+// Wires the step-based pipeline for user-sync.
+// Pattern 1 (active): tx_upsert per window, slot scope = window.
+// Switch patterns by editing pipeline.toml only — no Rust changes needed.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use sync_engine::{
-    Connections, HasConnections, HasIteratorCfg, HasRetryCfg, JobSummary, MainJob, OAuth2Auth,
-    PostJob, PreJob, StandardConnections, StandardJob,
+    context::JobContext,
+    job::{Connections as JobConnTrait, JobSummary, MainJob, PostJob, PreJob},
+    pipeline_runner::{build_context, build_window_cfg, PipelineConfig, PostStepConfig},
+    runner::MainJobRunner,
+    step::{
+        control::SleepStep, fetch::FetchJsonStep, sink::TxUpsertStep, transform::TransformStep,
+        StepRunner,
+    },
 };
 
-use crate::config::AppConfig;
-use crate::generated::{envelopes::ApiUserResponse, records::DbUser, transforms::UserTransform};
+use crate::generated::{
+    envelopes::ApiUserResponse,
+    records::{ApiUser, DbUser},
+    transforms::UserTransform,
+};
 
 // ── Connections wrapper ───────────────────────────────────────────────────
 
-pub struct UserConnections(pub StandardConnections);
+pub struct UserConnections(pub Arc<JobContext>);
+impl JobConnTrait for UserConnections {}
 
-impl Connections for UserConnections {}
-
-impl HasConnections for UserConnections {
-    fn db_pool(&self) -> &sqlx::PgPool {
-        self.0.db_pool()
-    }
-    fn auth(&self) -> &OAuth2Auth {
-        self.0.auth()
-    }
-    fn http_client(&self) -> &reqwest::Client {
-        self.0.http_client()
-    }
-    fn endpoint(&self) -> &str {
-        self.0.endpoint()
-    }
-    fn extra_query(&self) -> Vec<(String, String)> {
-        self.0.extra_query()
-    }
-}
-
-// ── HasIteratorCfg / HasRetryCfg delegated from AppConfig ────────────────
-
-impl HasIteratorCfg for AppConfig {
-    fn start_interval(&self) -> i64 {
-        self.source.start_interval
-    }
-    fn end_interval(&self) -> i64 {
-        self.source.end_interval
-    }
-    fn interval_limit(&self) -> i64 {
-        self.source.interval_limit
-    }
-    fn window_sleep_secs(&self) -> u64 {
-        self.source.window_sleep_secs
-    }
-}
-
-impl HasRetryCfg for AppConfig {
-    fn max_attempts(&self) -> usize {
-        5
-    }
-    fn base_backoff_secs(&self) -> u64 {
-        2
-    }
-}
-
-// ── Job struct ────────────────────────────────────────────────────────────
+// ── Job ───────────────────────────────────────────────────────────────────
 
 pub struct UserSyncJob;
 
-// PreJob — build connections (no duplicate OAuth2Client; uses library type)
 #[async_trait]
 impl PreJob for UserSyncJob {
     type Cx = UserConnections;
-    type Cfg = AppConfig;
+    type Cfg = PipelineConfig;
 
-    async fn run(cfg: &AppConfig) -> Result<UserConnections> {
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(620))
-            .tcp_keepalive(std::time::Duration::from_secs(30))
-            .build()?;
-
-        let db = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&cfg.sink.database_url)
-            .await
-            .context("Postgres connect failed")?;
-
-        let auth = OAuth2Auth::new(
-            http.clone(),
-            &cfg.auth.token_url,
-            &cfg.auth.client_id,
-            &cfg.auth.client_secret,
-        );
-
-        let extra_query = if cfg.source.include_realm_types.is_empty() {
-            vec![]
-        } else {
-            vec![(
-                "realm_type".to_owned(),
-                cfg.source.include_realm_types.clone(),
-            )]
-        };
-
-        Ok(UserConnections(StandardConnections {
-            db,
-            auth,
-            http,
-            endpoint: cfg.source.user_endpoint.clone(),
-            extra_query,
-        }))
+    async fn run(cfg: &PipelineConfig) -> Result<UserConnections> {
+        Ok(UserConnections(build_context(cfg).await?))
     }
 }
 
-// MainJob — entirely provided by StandardJob; one delegating line
 #[async_trait]
 impl MainJob for UserSyncJob {
     type Cx = UserConnections;
-    type Cfg = AppConfig;
+    type Cfg = PipelineConfig;
 
-    async fn run(cx: &UserConnections, cfg: &AppConfig) -> Result<JobSummary> {
-        StandardJob::<UserConnections, AppConfig, ApiUserResponse, DbUser, UserTransform>::run(
-            cx, cfg,
-        )
-        .await
+    async fn run(cx: &UserConnections, cfg: &PipelineConfig) -> Result<JobSummary> {
+        let ctx = Arc::clone(&cx.0);
+
+        // ── Retry steps ───────────────────────────────────────────────────
+        let mut retry = StepRunner::new();
+
+        // fetch: HTTP GET → writes Vec<ApiUser> into "api_rows" slot
+        retry.push(FetchJsonStep::<ApiUserResponse>::new("api_rows", false));
+
+        // transform: Vec<ApiUser> → Vec<DbUser>
+        retry.push(TransformStep::<ApiUser, DbUser, UserTransform>::new(
+            "api_rows",
+            "db_rows",
+            false, // replace, not append (window scope)
+            UserTransform,
+        ));
+
+        // sink: open tx, upsert each DbUser, commit
+        retry.push(TxUpsertStep::<DbUser>::new("db_rows"));
+
+        // ── Post-window steps (outside retry) ─────────────────────────────
+        let mut post_window = StepRunner::new();
+        let sleep_secs = cfg
+            .main_job
+            .iterator
+            .sleep_secs
+            .resolve_as::<u64>()
+            .unwrap_or(60);
+        post_window.push(SleepStep::new(sleep_secs));
+
+        // ── Post-loop steps (pattern 2: bulk tx after all windows) ─────────
+        let post_loop = StepRunner::new();
+        // Uncomment for pattern 2:
+        // post_loop.push(TxUpsertStep::<DbUser>::new("db_rows"));
+
+        let mut runner = MainJobRunner {
+            window_cfg: build_window_cfg(cfg)?,
+            retry_steps: retry,
+            post_window_steps: post_window,
+            post_loop_steps: post_loop,
+        };
+
+        runner.run(&ctx).await
     }
 }
 
-// PostJob — the only genuinely custom code left in user-sync
 #[async_trait]
 impl PostJob for UserSyncJob {
     type Cx = UserConnections;
-    type Cfg = AppConfig;
+    type Cfg = PipelineConfig;
 
-    async fn run(summary: JobSummary, cx: &UserConnections, cfg: &AppConfig) -> Result<()> {
+    async fn run(summary: JobSummary, cx: &UserConnections, cfg: &PipelineConfig) -> Result<()> {
         tracing::info!(
             windows = summary.windows_processed,
             fetched = summary.records_fetched,
@@ -143,14 +110,25 @@ impl PostJob for UserSyncJob {
             "Job complete"
         );
         for err in &summary.errors {
-            tracing::warn!(error = %err, "Recorded error");
+            tracing::warn!(error = %err, "Error");
         }
-        if !cfg.sink.sync_sql.trim().is_empty() {
-            tracing::info!("Running post-sync SQL");
-            sqlx::raw_sql(&cfg.sink.sync_sql)
-                .execute(&cx.0.db)
-                .await
-                .context("Post-sync SQL failed")?;
+
+        for step in &cfg.post_job.steps {
+            match step {
+                PostStepConfig::LogSummary => {}
+                PostStepConfig::RawSql { sql, skip_if_empty } => {
+                    let s = sql.resolve().unwrap_or_default();
+                    if s.trim().is_empty() && *skip_if_empty {
+                        continue;
+                    }
+                    tracing::info!("Running post-sync SQL");
+                    sqlx::raw_sql(&s)
+                        .execute(&cx.0.connections.db)
+                        .await
+                        .context("Post-sync SQL failed")?;
+                }
+                PostStepConfig::DrainQueue { .. } | PostStepConfig::Custom { .. } => {}
+            }
         }
         Ok(())
     }

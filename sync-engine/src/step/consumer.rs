@@ -12,7 +12,6 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::marker::PhantomData;
-use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
