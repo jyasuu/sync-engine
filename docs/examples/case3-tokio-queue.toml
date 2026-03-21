@@ -1,0 +1,120 @@
+# case3-tokio-queue.toml
+#
+# Pattern: async producer / consumer using an in-process tokio mpsc channel.
+# The main loop (producer) fetches and transforms at full speed; a concurrently
+# running consumer task commits batches to Postgres independently.
+#
+# Trade-offs vs case 1:
+#   + Fetch and write run concurrently — better throughput for slow APIs
+#   + Consumer can batch multiple windows before committing
+#   + Natural backpressure via channel capacity
+#   - More complex failure handling (producer/consumer can fail independently)
+#   - Consumer task must be drained in post_job
+#
+# Changed from case 1:
+#   [slots.db_rows]      replaced with [queues.db_rows] type="tokio"
+#   [[pre_job.steps]]    spawn_consumer added
+#   retry tx_upsert      replaced with send_to_queue
+#   [[post_job.steps]]   drain_queue added before log_summary
+
+[job]
+name = "user-sync"
+
+[job.scheduler]
+cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+
+[resources.pg]
+type            = "postgres"
+url             = { env = "SINK__DATABASE_URL" }
+max_connections = 5
+
+[resources.auth]
+type          = "oauth2"
+token_url     = { env = "AUTH__TOKEN_URL" }
+client_id     = { env = "AUTH__CLIENT_ID" }
+client_secret = { env = "AUTH__CLIENT_SECRET" }
+
+[resources.http]
+type           = "http_client"
+timeout_secs   = 620
+keepalive_secs = 30
+
+[resources.svc]
+type       = "http_service"
+http       = "http"
+auth       = "auth"
+endpoint   = { env = "SOURCE__USER_ENDPOINT" }
+realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
+
+[slots.api_rows]
+type  = "ApiUser"
+scope = "window"
+
+# KEY: db_rows is now a queue, not a slot
+[queues.db_rows]
+type     = "tokio"
+capacity = 256      # backpressure: producer blocks when consumer falls behind
+
+[pre_job]
+init_resources = true
+
+# KEY: spawn consumer task before main_job starts
+[[pre_job.steps]]
+type        = "spawn_consumer"
+queue       = "db_rows"
+model       = "DbUser"
+commit_mode = "per_batch"       # commit each received batch immediately
+# commit_mode = "drain_in_post_job"  # alternative: accumulate, commit in post_job
+
+[main_job.iterator]
+type           = "date_window"
+start_interval = { env = "SOURCE__START_INTERVAL",    default = "30" }
+end_interval   = { env = "SOURCE__END_INTERVAL",      default = "0" }
+interval_limit = { env = "SOURCE__INTERVAL_LIMIT",    default = "7" }
+sleep_secs     = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
+
+[main_job.retry]
+max_attempts = 5
+backoff_secs = 2
+
+[[main_job.retry_steps]]
+type     = "fetch"
+envelope = "ApiUserResponse"
+writes   = "api_rows"
+append   = false
+
+[[main_job.retry_steps]]
+type      = "transform"
+transform = "UserTransform"
+reads     = "api_rows"
+writes    = "db_rows_tmp"   # temp window slot; sent to queue then discarded
+append    = false
+
+# KEY: send to queue instead of committing directly
+[[main_job.retry_steps]]
+type  = "send_to_queue"
+reads = "db_rows_tmp"
+queue = "db_rows"
+
+[[main_job.post_window_steps]]
+type = "sleep"
+secs = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
+
+# ── Post-job ──────────────────────────────────────────────────────────────
+# drain_queue closes the channel and awaits the consumer task before logging.
+
+[[post_job.steps]]
+type  = "drain_queue"   # KEY: close channel + await consumer task
+queue = "db_rows"
+
+[[post_job.steps]]
+type = "log_summary"
+
+[[post_job.steps]]
+type          = "raw_sql"
+sql           = { env = "SINK__SYNC_SQL", default = "" }
+skip_if_empty = true
+
+[[post_job.steps]]
+type = "custom"
+hook = "UserSyncSummary"

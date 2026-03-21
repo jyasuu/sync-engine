@@ -1,0 +1,108 @@
+# case2-bulk-tx.toml
+#
+# Pattern: accumulate transformed rows across all windows into a job-scoped
+# slot, then commit everything in one Postgres transaction after the iterator
+# is exhausted.
+#
+# Trade-offs vs case 1:
+#   + Fewer Postgres round-trips (one commit instead of N)
+#   + post_job can read the full accumulated dataset for custom reporting
+#   - Higher memory use (all rows held in RAM until loop ends)
+#   - One failure anywhere in post_loop rolls back the entire job's data
+#
+# Changed from case 1:
+#   [slots.db_rows]     scope = "job"       (was "window")
+#   transform           append = true       (was false)
+#   retry_steps         no tx_upsert        (removed)
+#   post_loop_steps     tx_upsert added
+
+[job]
+name = "user-sync"
+
+[job.scheduler]
+cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+
+[resources.pg]
+type            = "postgres"
+url             = { env = "SINK__DATABASE_URL" }
+max_connections = 5
+
+[resources.auth]
+type          = "oauth2"
+token_url     = { env = "AUTH__TOKEN_URL" }
+client_id     = { env = "AUTH__CLIENT_ID" }
+client_secret = { env = "AUTH__CLIENT_SECRET" }
+
+[resources.http]
+type           = "http_client"
+timeout_secs   = 620
+keepalive_secs = 30
+
+[resources.svc]
+type       = "http_service"
+http       = "http"
+auth       = "auth"
+endpoint   = { env = "SOURCE__USER_ENDPOINT" }
+realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
+
+[slots.api_rows]
+type  = "ApiUser"
+scope = "window"
+
+[slots.db_rows]
+type  = "DbUser"
+scope = "job"       # KEY: job = survives across windows; readable in post_job
+
+[pre_job]
+init_resources = true
+
+[main_job.iterator]
+type           = "date_window"
+start_interval = { env = "SOURCE__START_INTERVAL",    default = "30" }
+end_interval   = { env = "SOURCE__END_INTERVAL",      default = "0" }
+interval_limit = { env = "SOURCE__INTERVAL_LIMIT",    default = "7" }
+sleep_secs     = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
+
+[main_job.retry]
+max_attempts = 5
+backoff_secs = 2
+
+[[main_job.retry_steps]]
+type     = "fetch"
+envelope = "ApiUserResponse"
+writes   = "api_rows"
+append   = false
+
+[[main_job.retry_steps]]
+type      = "transform"
+transform = "UserTransform"
+reads     = "api_rows"
+writes    = "db_rows"
+append    = true        # KEY: append accumulates across windows
+
+# (no tx_upsert here)
+
+[[main_job.post_window_steps]]
+type = "sleep"
+secs = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
+
+# KEY: single bulk commit after all windows complete
+[[main_job.post_loop_steps]]
+type  = "tx_upsert"
+model = "DbUser"
+reads = "db_rows"
+
+# ── Post-job ──────────────────────────────────────────────────────────────
+# db_rows is job-scoped so it's still readable here for custom reporting.
+
+[[post_job.steps]]
+type = "log_summary"
+
+[[post_job.steps]]
+type          = "raw_sql"
+sql           = { env = "SINK__SYNC_SQL", default = "" }
+skip_if_empty = true
+
+[[post_job.steps]]
+type = "custom"
+hook = "UserSyncSummary"    # receives ctx; can read db_rows slot for reporting
