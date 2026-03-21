@@ -412,15 +412,30 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
     let ctx = Arc::new(JobContext::new(connections, config, job_name));
 
     // ── Declare slots ─────────────────────────────────────────────────────
-    if let Some(slots) = &cfg.slots {
+    {
         let mut slot_map = ctx.slots.write().await;
-        for (key, def) in slots {
-            let scope: SlotScope = match def.scope {
-                SlotScopeStr::Window => SlotScope::Window,
-                SlotScopeStr::Job => SlotScope::Job,
-                SlotScopeStr::Pipeline => SlotScope::Pipeline,
-            };
-            slot_map.declare(key, scope);
+
+        // Always declare summary slots — steps write/read these regardless
+        // of what the user declares in pipeline.toml [slots].
+        slot_map.declare("summary.windows_processed", SlotScope::Job);
+        slot_map.declare("summary.error_count", SlotScope::Job);
+        slot_map.declare("summary.total_fetched", SlotScope::Job);
+        slot_map.declare("summary.total_upserted", SlotScope::Job);
+        slot_map.declare("summary.total_skipped", SlotScope::Job);
+        slot_map.declare("window.fetched", SlotScope::Window);
+        slot_map.declare("window.upserted", SlotScope::Window);
+        slot_map.declare("window.skipped", SlotScope::Window);
+
+        // User-declared slots from pipeline.toml [slots]
+        if let Some(slots) = &cfg.slots {
+            for (key, def) in slots {
+                let scope = match def.scope {
+                    SlotScopeStr::Window => SlotScope::Window,
+                    SlotScopeStr::Job => SlotScope::Job,
+                    SlotScopeStr::Pipeline => SlotScope::Pipeline,
+                };
+                slot_map.declare(key, scope);
+            }
         }
     }
 

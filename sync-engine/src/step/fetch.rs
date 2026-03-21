@@ -101,11 +101,20 @@ where
         let items = envelope.into_items();
         info!(fetched = items.len(), slot = %self.writes, "Fetch OK");
 
+        // Write count so LogSummaryStep can aggregate across windows
+        let count = items.len();
         if self.append {
             ctx.slot_append(&self.writes, items).await?;
         } else {
             ctx.slot_write(&self.writes, items).await?;
         }
+        // Accumulate into job-scoped total
+        let prev: usize = ctx.slot_read("summary.total_fetched").await.unwrap_or(0);
+        ctx.slot_write("summary.total_fetched", prev + count)
+            .await?;
+
+        // Window-scoped count for this attempt
+        ctx.slot_write("window.fetched", count).await?;
 
         Ok(())
     }

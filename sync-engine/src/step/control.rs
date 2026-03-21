@@ -43,8 +43,9 @@ impl Step for SleepStep {
 
 // ── LogSummaryStep ────────────────────────────────────────────────────────
 
-/// Reads the JobSummary from the context config map and logs it.
-/// The main_job loop writes summary fields as config entries.
+/// Reads job-scoped count slots written by FetchJsonStep and TxUpsertStep
+/// and logs a final summary. Also reads the JobSummary written by MainJobRunner
+/// via the "summary.*" config entries for window/error counts.
 pub struct LogSummaryStep;
 
 #[async_trait]
@@ -54,14 +55,17 @@ impl Step for LogSummaryStep {
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
-        let windows = ctx.cfg_or("summary.windows_processed", "?");
-        let fetched = ctx.cfg_or("summary.records_fetched", "?");
-        let upserted = ctx.cfg_or("summary.records_upserted", "?");
-        let skipped = ctx.cfg_or("summary.records_skipped", "?");
-        let errors = ctx.cfg_or("summary.error_count", "?");
+        let windows: usize = ctx
+            .slot_read("summary.windows_processed")
+            .await
+            .unwrap_or(0);
+        let errors: usize = ctx.slot_read("summary.error_count").await.unwrap_or(0);
+        let fetched: usize = ctx.slot_read("summary.total_fetched").await.unwrap_or(0);
+        let upserted: usize = ctx.slot_read("summary.total_upserted").await.unwrap_or(0);
+        let skipped: usize = ctx.slot_read("summary.total_skipped").await.unwrap_or(0);
 
         info!(
-            job      = %ctx.job_name,
+            job = %ctx.job_name,
             windows,
             fetched,
             upserted,

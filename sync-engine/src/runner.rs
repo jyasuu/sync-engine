@@ -110,6 +110,14 @@ impl MainJobRunner {
                 }
             }
 
+            // Update job-scoped summary slots so LogSummaryStep reads live totals
+            ctx.slot_write("summary.windows_processed", summary.windows_processed)
+                .await
+                .ok();
+            ctx.slot_write("summary.error_count", summary.errors.len())
+                .await
+                .ok();
+
             // Post-window steps (sleep already handled above, but explicit
             // SleepStep in the runner is also fine — it will no-op if 0)
             if let Err(e) = self.post_window_steps.run_all(ctx).await {

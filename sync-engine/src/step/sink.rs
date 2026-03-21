@@ -63,6 +63,18 @@ where
 
         tx.commit().await.context("commit tx")?;
         info!(upserted, skipped, slot = %self.reads, "Tx committed");
+
+        // Window-scoped counts for runner.rs to read per-window
+        ctx.slot_write("window.upserted", upserted).await?;
+        ctx.slot_write("window.skipped", skipped).await?;
+
+        // Accumulate into job-scoped totals readable in post_job
+        let prev_u: usize = ctx.slot_read("summary.total_upserted").await.unwrap_or(0);
+        let prev_s: usize = ctx.slot_read("summary.total_skipped").await.unwrap_or(0);
+        ctx.slot_write("summary.total_upserted", prev_u + upserted)
+            .await?;
+        ctx.slot_write("summary.total_skipped", prev_s + skipped)
+            .await?;
         Ok(())
     }
 }
