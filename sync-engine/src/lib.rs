@@ -11,6 +11,7 @@ pub mod runner;
 pub mod slot;
 pub mod standard_job;
 pub mod step;
+pub mod transport;
 
 // ── Components ────────────────────────────────────────────────────────────
 pub use components::{
@@ -40,9 +41,12 @@ pub use step::sink::{SendToQueueStep, TxUpsertStep};
 pub use step::transform::TransformStep;
 pub use step::Step;
 
+// ── Transport ─────────────────────────────────────────────────────────────
+pub use transport::{RabbitmqConfig, RabbitmqConsumer, RabbitmqProducer, RabbitmqQueue};
+
 // ── TypeRegistry + run() entry-point ─────────────────────────────────────
 pub use pipeline_runner::{
-    build_context, build_steps, build_window_cfg, run, MainJobConfig, MainStepConfig,
+    build_context, build_steps, build_window_cfg, run, validate, MainJobConfig, MainStepConfig,
     PipelineConfig, PostJobConfig, PostStepConfig, PreJobConfig, QueueDef, ResourceDef,
     SchedulerConfig, SlotDef,
 };

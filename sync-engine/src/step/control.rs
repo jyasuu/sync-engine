@@ -135,40 +135,42 @@ impl Step for DrainQueueStep {
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
-        use crate::step::consumer::ConsumerHandle;
-
-        // Drop the sender so the consumer task knows we're done producing.
-        {
-            let queues = ctx.queues.read().await;
-            if let Some(entry) = queues.get(&self.queue) {
-                // The tx clone is dropped when the QueueEntry is dropped or
-                // when all senders are dropped. To signal EOF we close the
-                // channel — we do this by dropping all senders except those
-                // inside the QueueEntry itself. Since QueueEntry holds the
-                // last tx after all SendToQueueSteps have run, we need to
-                // explicitly close it here.
-                drop(entry.tx.clone()); // no-op: need all senders gone
-            }
-        }
-        // Actually close the channel by dropping the queue entry.
+        // Close the channel by dropping the queue entry — signals EOF to consumer.
         ctx.queues.write().await.remove(&self.queue);
 
-        // Await the consumer task.
+        // Take the consumer handle from the slot without requiring Clone.
+        // We replace the slot value with None (a fresh empty Option) so the
+        // slot remains declared but empty after we extract the handle.
         let handle_slot = format!("__consumer_handle_{}", self.queue);
-        let consumer: ConsumerHandle = ctx
-            .slots
-            .write()
-            .await
-            .take(&handle_slot)
-            .await
-            .context("Consumer handle not found — was SpawnConsumerStep run?")?;
+        let handle_opt: Option<tokio::task::JoinHandle<()>> = {
+            let mut slots = ctx.slots.write().await;
+            let entry = slots.slots.get_mut(&handle_slot).with_context(|| {
+                format!(
+                    "Consumer handle slot \"{handle_slot}\" not found — was SpawnConsumerStep run?"
+                )
+            })?;
+            let arc = entry.value.take().with_context(|| {
+                format!("Consumer handle for \"{}\" already consumed", self.queue)
+            })?;
+            // Unwrap the Arc — we just took the only reference from the slot.
+            match std::sync::Arc::try_unwrap(arc) {
+                Ok(lock) => {
+                    let boxed = lock.into_inner();
+                    boxed
+                        .downcast::<Option<tokio::task::JoinHandle<()>>>()
+                        .ok()
+                        .map(|b| *b)
+                        .flatten()
+                }
+                Err(_) => None,
+            }
+        };
 
-        consumer.handle.await.ok();
-        info!(queue = %self.queue, "Consumer task joined");
+        if let Some(handle) = handle_opt {
+            handle.await.ok();
+            info!(queue = %self.queue, "Consumer task joined");
+        }
 
-        // If DrainInPostJob mode: the consumer task already accumulated and
-        // committed items internally. This step just ensures the handle is
-        // joined before post_job proceeds.
         let rx_slot = format!("__accum_rx_{}", self.queue);
         if ctx.slot_is_set(&rx_slot).await {
             info!(queue = %self.queue, "Accumulated items handled by consumer task");

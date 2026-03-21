@@ -29,6 +29,7 @@ use crate::runner::{MainJobRunner, WindowConfig};
 use crate::slot::SlotScope;
 use crate::step::consumer::CommitMode;
 use crate::step::control::{DrainQueueStep, LogSummaryStep, RawSqlStep, SleepStep};
+use crate::step::Step;
 use crate::step::StepRunner;
 
 // ── Re-exports for backwards compat ───────────────────────────────────────
@@ -286,6 +287,151 @@ pub struct BuiltResources {
     pub extra_query: Vec<(String, String)>,
 }
 
+// ── Startup validation ────────────────────────────────────────────────────
+
+/// Validates pipeline.toml against the registry at startup.
+/// Catches typos, missing registrations, and undeclared slots before
+/// the first job tick runs.
+pub fn validate(cfg: &PipelineConfig, registry: &TypeRegistry) -> Result<()> {
+    let mut errors: Vec<String> = Vec::new();
+
+    // Collect declared slot and queue names
+    let slot_names: std::collections::HashSet<&str> =
+        cfg.slots.keys().map(|s| s.as_str()).collect();
+    let queue_names: std::collections::HashSet<&str> =
+        cfg.queues.keys().map(|s| s.as_str()).collect();
+    let all_channels: std::collections::HashSet<&str> = slot_names
+        .iter()
+        .chain(queue_names.iter())
+        .copied()
+        .collect();
+
+    // Built-in slot names that are always available
+    let builtin: std::collections::HashSet<&str> = [
+        "summary.windows_processed",
+        "summary.error_count",
+        "summary.total_fetched",
+        "summary.total_upserted",
+        "summary.total_skipped",
+        "window.fetched",
+        "window.upserted",
+        "window.skipped",
+    ]
+    .iter()
+    .copied()
+    .collect();
+
+    let check_slot = |name: &str, context: &str, errors: &mut Vec<String>| {
+        if !all_channels.contains(name) && !builtin.contains(name) {
+            errors.push(format!(
+                "{context}: slot/queue \"{name}\" not declared in [slots] or [queues]"
+            ));
+        }
+    };
+
+    // Validate all step lists
+    let all_steps = cfg
+        .main_job
+        .retry_steps
+        .iter()
+        .chain(cfg.main_job.post_window_steps.iter())
+        .chain(cfg.main_job.post_loop_steps.iter());
+
+    for step in all_steps {
+        let ctx = format!("step type=\"{}\"", step.step_type);
+        match step.step_type.as_str() {
+            "fetch" => {
+                match &step.envelope {
+                    None => errors.push(format!("{ctx}: missing `envelope` field")),
+                    Some(e) => if !registry.has_envelope(e) {
+                        errors.push(format!(
+                            "{ctx}: envelope \"{e}\" not registered — add registry.register_envelope::<{e}>(\"{e}\") in main.rs"
+                        ));
+                    }
+                }
+                if let Some(ref w) = step.writes {
+                    check_slot(w, &ctx, &mut errors);
+                }
+            }
+            "transform" => {
+                match &step.transform {
+                    None => errors.push(format!("{ctx}: missing `transform` field")),
+                    Some(t) => if !registry.has_transform(t) {
+                        errors.push(format!(
+                            "{ctx}: transform \"{t}\" not registered — add registry.register_transform::<Src, Dst, {t}>(\"{t}\") in main.rs"
+                        ));
+                    }
+                }
+                if let Some(ref r) = step.reads  { check_slot(r, &ctx, &mut errors); }
+                if let Some(ref w) = step.writes { check_slot(w, &ctx, &mut errors); }
+            }
+            "tx_upsert" => {
+                match &step.model {
+                    None => errors.push(format!("{ctx}: missing `model` field")),
+                    Some(m) => if !registry.has_model(m) {
+                        errors.push(format!(
+                            "{ctx}: model \"{m}\" not registered — add registry.register_model::<{m}>(\"{m}\") in main.rs"
+                        ));
+                    }
+                }
+                if let Some(ref r) = step.reads { check_slot(r, &ctx, &mut errors); }
+            }
+            "send_to_queue" => {
+                match &step.model {
+                    None => errors.push(format!("{ctx}: missing `model` field — needed for typed queue send")),
+                    Some(m) => if !registry.has_queue_send(m) {
+                        errors.push(format!(
+                            "{ctx}: model \"{m}\" not registered — add registry.register_model::<{m}>(\"{m}\") in main.rs"
+                        ));
+                    }
+                }
+                if let Some(ref r) = step.reads { check_slot(r, &ctx, &mut errors); }
+                match &step.queue {
+                    None => errors.push(format!("{ctx}: missing `queue` field")),
+                    Some(q) => if !queue_names.contains(q.as_str()) {
+                        errors.push(format!("{ctx}: queue \"{q}\" not declared in [queues]"));
+                    }
+                }
+            }
+            "sleep" | "raw_sql" => {} // no type-level validation needed
+            other => errors.push(format!("Unknown step type \"{other}\" — valid types: fetch, transform, tx_upsert, send_to_queue, sleep, raw_sql")),
+        }
+    }
+
+    // Validate pre_job consumer steps
+    for step in &cfg.pre_job.steps {
+        let PreStepConfig::SpawnConsumer { queue, model, .. } = step;
+        if !queue_names.contains(queue.as_str()) {
+            errors.push(format!(
+                "pre_job spawn_consumer: queue \"{queue}\" not declared in [queues]"
+            ));
+        }
+        if !registry.has_model(model.as_str()) {
+            errors.push(format!(
+                "pre_job spawn_consumer: model \"{model}\" not registered — add registry.register_model::<{model}>(\"{model}\") in main.rs"
+            ));
+        }
+    }
+
+    // Validate post_job drain_queue steps
+    for step in &cfg.post_job.steps {
+        if let PostStepConfig::DrainQueue { queue } = step {
+            if !queue_names.contains(queue.as_str()) {
+                errors.push(format!(
+                    "post_job drain_queue: queue \"{queue}\" not declared in [queues]"
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        let msg = errors.join("\n  ");
+        Err(anyhow!("pipeline.toml validation failed:\n  {msg}\n"))
+    }
+}
+
 // ── build_context ─────────────────────────────────────────────────────────
 
 pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
@@ -449,13 +595,48 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
                 exchange,
                 routing_key,
             } => {
-                // RabbitMQ integration point — registered as a named queue
-                // for now; full amqp transport can be plugged in here.
-                let _url = url.resolve()?;
-                let _exchange = exchange.resolve()?;
-                let _rk = routing_key.resolve()?;
-                tracing::warn!(queue = %name, "RabbitMQ transport not yet implemented — using tokio fallback");
-                ctx.register_queue(name, 256).await;
+                let url_str = url.resolve()?;
+                let exchange_str = exchange.resolve()?;
+                let routing_key_str = routing_key.resolve()?;
+                info!(
+                    "queue[{}]: connecting to RabbitMQ exchange={}",
+                    name, exchange_str
+                );
+                // Store the config in the context's queue map under a special key
+                // so SpawnConsumerStep and SendToQueueStep can retrieve it.
+                // We use a tokio channel as the in-process bridge; the producer
+                // step serializes and publishes via lapin, consumer subscribes.
+                use crate::transport::rabbitmq::{RabbitmqConfig, RabbitmqQueue};
+                let rmq_cfg = RabbitmqConfig {
+                    url: url_str,
+                    exchange: exchange_str,
+                    routing_key: routing_key_str,
+                    queue_name: None,
+                };
+                // Connect producer; consumer is connected when spawn_consumer runs.
+                match RabbitmqQueue::connect(rmq_cfg).await {
+                    Ok(q) => {
+                        // Store in context via a dedicated slot so steps can access it
+                        {
+                            let mut slots = ctx.slots.write().await;
+                            slots.declare(
+                                &format!("__rmq_queue_{name}"),
+                                crate::slot::SlotScope::Pipeline,
+                            );
+                        }
+                        ctx.slot_write(
+                            &format!("__rmq_queue_{name}"),
+                            std::sync::Arc::new(tokio::sync::Mutex::new(q)),
+                        )
+                        .await?;
+                        // Also register a tokio bridge channel for in-process coordination
+                        ctx.register_queue(name, 256).await;
+                        info!("queue[{}]: RabbitMQ connected", name);
+                    }
+                    Err(e) => {
+                        return Err(e.context(format!("Failed to connect RabbitMQ queue [{name}]")));
+                    }
+                }
             }
         }
     }
@@ -514,15 +695,18 @@ pub fn build_steps(steps: &[MainStepConfig], registry: &TypeRegistry) -> Result<
                 runner.push_boxed(registry.build_model_sink(model, &params)?);
             }
             "send_to_queue" => {
+                let model = s.model.as_deref().ok_or_else(|| {
+                    anyhow!("send_to_queue step missing `model` field — set model = \"DbUser\"")
+                })?;
                 let reads = s.reads.clone().unwrap_or_else(|| "db_rows".into());
                 let queue = s
                     .queue
                     .clone()
                     .ok_or_else(|| anyhow!("send_to_queue step missing `queue` field"))?;
-                // SendToQueueStep is not model-typed — it sends Box<dyn Any>
-                // The queue consumer will downcast on the other end.
-                // We use a raw step here because we don't have the type at this level.
-                runner.push_boxed(Box::new(RawSendStep { reads, queue }));
+                let mut p = params.clone();
+                p.insert("reads".into(), reads);
+                p.insert("queue".into(), queue);
+                runner.push_boxed(registry.build_queue_send(model, &p)?);
             }
             "sleep" => {
                 let secs = s
@@ -548,33 +732,6 @@ pub fn build_steps(steps: &[MainStepConfig], registry: &TypeRegistry) -> Result<
         }
     }
     Ok(runner)
-}
-
-// ── RawSendStep ───────────────────────────────────────────────────────────
-// Placeholder for send_to_queue when no typed model factory is available.
-// The real typed version is built by TypeRegistry::build_queue_send (future).
-
-use crate::step::Step;
-use async_trait::async_trait;
-
-struct RawSendStep {
-    reads: String,
-    queue: String,
-}
-
-#[async_trait]
-impl Step for RawSendStep {
-    fn name(&self) -> &str {
-        "send_to_queue"
-    }
-    async fn run(&self, _ctx: &JobContext) -> Result<()> {
-        tracing::warn!(
-            slot  = %self.reads,
-            queue = %self.queue,
-            "send_to_queue requires registry.register_model — step skipped"
-        );
-        Ok(())
-    }
 }
 
 // ── PostJobExecutor ───────────────────────────────────────────────────────
@@ -638,6 +795,10 @@ pub async fn run(path: &str, registry: TypeRegistry) -> Result<()> {
     let cfg = Arc::new(cfg);
     let reg = Arc::new(registry);
 
+    // Validate pipeline config against registry before starting the scheduler.
+    // Catches typos and missing registrations at startup, not on first tick.
+    validate(&cfg, &reg)?;
+
     // Build context once — pipeline-scoped slots survive cron ticks
     let ctx = build_context(&cfg).await?;
 
@@ -681,16 +842,20 @@ async fn run_one_tick(
     for step in &cfg.pre_job.steps {
         match step {
             PreStepConfig::SpawnConsumer {
-                queue, commit_mode, ..
+                queue,
+                model,
+                commit_mode,
+                accum_slot,
             } => {
-                let _mode = match commit_mode {
+                let mode = match commit_mode {
                     CommitModeStr::PerBatch => CommitMode::PerBatch,
                     CommitModeStr::DrainInPostJob => CommitMode::DrainInPostJob,
                 };
-                // Consumer task is model-typed — we need the model from the registry.
-                // For now log a warning; full typed consumer spawn requires
-                // the model factory to produce a consumer step.
-                tracing::warn!(queue = %queue, "spawn_consumer: use register_model for typed consumer");
+                let consumer_step = reg.build_consumer(model, queue, mode, accum_slot.clone())?;
+                consumer_step
+                    .run(ctx)
+                    .await
+                    .with_context(|| format!("spawn_consumer for queue \"{queue}\" failed"))?;
             }
         }
     }

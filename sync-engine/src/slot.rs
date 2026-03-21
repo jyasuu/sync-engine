@@ -101,8 +101,9 @@ impl SlotMap {
     }
 
     /// Take the value out of a slot, replacing it with None.
-    /// Useful when the consumer wants to own the data (avoids a clone).
-    pub async fn take<T: Any + Send + Sync + 'static>(&mut self, key: &str) -> Result<T> {
+    /// Useful when the consumer wants to own the data (avoids a clone for Vec<T>).
+    /// If the Arc has multiple holders (rare), falls back to a clone via read().
+    pub async fn take<T: Any + Send + Sync + Clone + 'static>(&mut self, key: &str) -> Result<T> {
         let entry = self
             .slots
             .get_mut(key)
@@ -113,30 +114,24 @@ impl SlotMap {
             .take()
             .with_context(|| format!("Slot \"{key}\" has not been written yet"))?;
 
-        // We're the only holder now (take() removed it from the map).
-        // Try to unwrap the Arc; if something else holds a ref, clone instead.
-        let boxed = match Arc::try_unwrap(arc) {
-            Ok(lock) => lock.into_inner(),
+        // Fast path: we're the only holder — unwrap directly.
+        match Arc::try_unwrap(arc) {
+            Ok(lock) => lock
+                .into_inner()
+                .downcast::<T>()
+                .map(|b| *b)
+                .map_err(|_| anyhow!("Slot \"{key}\" type mismatch on take")),
+            // Slow path: something else holds a reference — clone the value
+            // and put the Arc back so the slot remains usable.
             Err(arc) => {
-                // Someone else is holding a ref — clone the inner value.
-                // Re-insert so the slot is still valid.
                 entry.value = Some(arc.clone());
                 let guard = arc.read().await;
-                return guard
+                guard
                     .downcast_ref::<T>()
-                    .map(|_| {
-                        // Can't clone without the Clone bound — caller should
-                        // use read() if they don't need ownership.
-                        unreachable!("use read() for shared access")
-                    })
-                    .ok_or_else(|| anyhow!("Slot \"{key}\" type mismatch on take"));
+                    .cloned()
+                    .ok_or_else(|| anyhow!("Slot \"{key}\" type mismatch on take"))
             }
-        };
-
-        boxed
-            .downcast::<T>()
-            .map(|b| *b)
-            .map_err(|_| anyhow!("Slot \"{key}\" type mismatch on take"))
+        }
     }
 
     /// Append items to a Vec slot. Creates the Vec if the slot is empty.

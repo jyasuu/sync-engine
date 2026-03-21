@@ -1,20 +1,14 @@
-# user-sync/pipeline.toml
+# case1-tx-per-window.toml
 #
-# Complete pipeline definition. No Rust code needed except main.rs
-# which registers the generated types by name.
+# Pattern: fetch → transform → commit, one Postgres transaction per window.
+# Simplest and safest. Each window is independent — failure retries only
+# that window; all previous windows are already durable.
 #
-# Switch patterns by changing:
-#   Case 1 (active): db_rows scope=window, tx_upsert inside [[main_job.retry_steps]]
-#   Case 2:          db_rows scope=job,    tx_upsert in [[main_job.post_loop_steps]], transform append=true
-#   Case 3:          replace [slots.db_rows] with [queues.db_rows] type="tokio",
-#                    add [[pre_job.steps]] type="spawn_consumer",
-#                    replace tx_upsert with send_to_queue in retry_steps
-#   Case 4:          [queues.db_rows] type="rabbitmq" + rabbitmq config
-#
-# Config value syntax:
-#   "literal"                           used as-is
-#   { env = "VAR" }                     required env var
-#   { env = "VAR", default = "val" }    env var with fallback
+# main.rs:
+#   registry.register_envelope::<ApiUserResponse>("ApiUserResponse");
+#   registry.register_transform::<ApiUser, DbUser, UserTransform>("UserTransform");
+#   registry.register_model::<DbUser>("DbUser");
+#   sync_engine::run("pipeline.toml", registry).await
 
 [job]
 name = "user-sync"
@@ -22,8 +16,7 @@ name = "user-sync"
 [job.scheduler]
 cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
 
-# ── Resources ─────────────────────────────────────────────────────────────
-# Named connections. Engine builds them in dependency order.
+# ── Resources — identical in all four cases ───────────────────────────────
 
 [resources.pg]
 type            = "postgres"
@@ -48,34 +41,20 @@ auth       = "auth"
 endpoint   = { env = "SOURCE__USER_ENDPOINT" }
 realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
 
-# ── Slots ─────────────────────────────────────────────────────────────────
-# Named typed data channels shared between steps.
+# ── Slots — window scope: cleared before each retry attempt ───────────────
 
 [slots.api_rows]
-type  = "ApiUser"   # schema.toml record name — for docs
-scope = "window"    # cleared at start of each window
+type  = "ApiUser"
+scope = "window"
 
 [slots.db_rows]
-type  = "DbUser"    # schema.toml record name — for docs
-scope = "window"    # case 1: window | case 2: change to "job"
-
-# Case 3/4 — replace [slots.db_rows] with:
-# [queues.db_rows]
-# type     = "tokio"       # or "rabbitmq"
-# capacity = 256
+type  = "DbUser"
+scope = "window"    # KEY: window = cleared every retry; tx commits inside loop
 
 # ── Pre-job ───────────────────────────────────────────────────────────────
-# init_resources = true builds all [resources] automatically.
 
 [pre_job]
 init_resources = true
-
-# Case 3/4 — add consumer:
-# [[pre_job.steps]]
-# type        = "spawn_consumer"
-# queue       = "db_rows"
-# model       = "DbUser"
-# commit_mode = "per_batch"   # or "drain_in_post_job"
 
 # ── Main job ──────────────────────────────────────────────────────────────
 
@@ -90,44 +69,27 @@ sleep_secs     = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
 max_attempts = 5
 backoff_secs = 2
 
-# Steps inside the retry loop — retried on failure per window.
-
 [[main_job.retry_steps]]
 type     = "fetch"
-envelope = "ApiUserResponse"   # registered in main.rs
+envelope = "ApiUserResponse"
 writes   = "api_rows"
 append   = false
 
 [[main_job.retry_steps]]
 type      = "transform"
-transform = "UserTransform"    # registered in main.rs
+transform = "UserTransform"
 reads     = "api_rows"
 writes    = "db_rows"
-append    = false              # case 2: change to true
+append    = false
 
-# Case 1 (active): tx per window
 [[main_job.retry_steps]]
-type  = "tx_upsert"
-model = "DbUser"               # registered in main.rs
+type  = "tx_upsert"     # commit happens here, inside the retry loop
+model = "DbUser"
 reads = "db_rows"
-
-# Case 3/4: replace tx_upsert with:
-# [[main_job.retry_steps]]
-# type  = "send_to_queue"
-# reads = "db_rows"
-# queue = "db_rows"
-
-# Steps after each window (outside retry loop).
 
 [[main_job.post_window_steps]]
 type = "sleep"
 secs = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
-
-# Case 2: bulk tx after all windows — uncomment:
-# [[main_job.post_loop_steps]]
-# type  = "tx_upsert"
-# model = "DbUser"
-# reads = "db_rows"
 
 # ── Post-job ──────────────────────────────────────────────────────────────
 
@@ -139,12 +101,6 @@ type          = "raw_sql"
 sql           = { env = "SINK__SYNC_SQL", default = "" }
 skip_if_empty = true
 
-# Case 3/4: drain queue before summary:
-# [[post_job.steps]]
-# type  = "drain_queue"
-# queue = "db_rows"
-
-# Custom Rust hook registered in main.rs:
-# [[post_job.steps]]
-# type = "custom"
-# hook = "MyCustomHook"
+[[post_job.steps]]
+type = "custom"
+hook = "UserSyncSummary"    # optional: register in main.rs or remove this step

@@ -3,6 +3,7 @@
 pub mod consumer;
 pub mod control;
 pub mod fetch;
+pub mod queue_send;
 pub mod setup;
 pub mod sink;
 pub mod transform;

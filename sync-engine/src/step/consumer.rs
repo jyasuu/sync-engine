@@ -161,21 +161,14 @@ where
             }
         });
 
-        // Declare and write the consumer handle into a pipeline-scoped slot
-        // so post_job's DrainQueueStep can await it.
+        // Store the join handle as Option<JoinHandle<()>> so DrainQueueStep
+        // can extract it without needing Clone (JoinHandle isn't Clone).
         let handle_slot = format!("__consumer_handle_{}", self.queue);
         {
             let mut slots = ctx.slots.write().await;
             slots.declare(&handle_slot, SlotScope::Job);
         }
-        ctx.slot_write(
-            &handle_slot,
-            ConsumerHandle {
-                handle,
-                queue_name: self.queue.clone(),
-            },
-        )
-        .await?;
+        ctx.slot_write(&handle_slot, Some(handle)).await?;
 
         // For DrainInPostJob: store the oneshot receiver so DrainQueueStep
         // can collect the accumulated items.

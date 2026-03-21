@@ -20,6 +20,8 @@ toml                 = "0.8"
 anyhow               = "1"
 backon               = "1"
 tracing              = "0.1"
+lapin                = "2"
+futures-lite         = "2"
 
 [build-dependencies]
 toml  = "0.8"
