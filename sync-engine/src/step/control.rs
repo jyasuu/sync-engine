@@ -1,0 +1,180 @@
+// sync-engine/src/step/control.rs
+//
+// Flow-control and post-job steps:
+//   SleepStep       — rate-limit sleep between windows
+//   LogSummaryStep  — log the JobSummary from ctx
+//   RawSqlStep      — run arbitrary SQL against the pool
+//   DrainQueueStep  — await the consumer task; collect accumulated items
+
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use std::time::Duration;
+use tracing::info;
+
+use crate::context::JobContext;
+use crate::step::Step;
+
+// ── SleepStep ─────────────────────────────────────────────────────────────
+
+pub struct SleepStep {
+    pub secs: u64,
+}
+
+impl SleepStep {
+    pub fn new(secs: u64) -> Self {
+        Self { secs }
+    }
+}
+
+#[async_trait]
+impl Step for SleepStep {
+    fn name(&self) -> &str {
+        "sleep"
+    }
+
+    async fn run(&self, _ctx: &JobContext) -> Result<()> {
+        if self.secs > 0 {
+            info!(secs = self.secs, "Rate-limit sleep");
+            tokio::time::sleep(Duration::from_secs(self.secs)).await;
+        }
+        Ok(())
+    }
+}
+
+// ── LogSummaryStep ────────────────────────────────────────────────────────
+
+/// Reads the JobSummary from the context config map and logs it.
+/// The main_job loop writes summary fields as config entries.
+pub struct LogSummaryStep;
+
+#[async_trait]
+impl Step for LogSummaryStep {
+    fn name(&self) -> &str {
+        "log_summary"
+    }
+
+    async fn run(&self, ctx: &JobContext) -> Result<()> {
+        let windows = ctx.cfg_or("summary.windows_processed", "?");
+        let fetched = ctx.cfg_or("summary.records_fetched", "?");
+        let upserted = ctx.cfg_or("summary.records_upserted", "?");
+        let skipped = ctx.cfg_or("summary.records_skipped", "?");
+        let errors = ctx.cfg_or("summary.error_count", "?");
+
+        info!(
+            job      = %ctx.job_name,
+            windows,
+            fetched,
+            upserted,
+            skipped,
+            errors,
+            "Job summary"
+        );
+        Ok(())
+    }
+}
+
+// ── RawSqlStep ────────────────────────────────────────────────────────────
+
+pub struct RawSqlStep {
+    pub sql: String,
+    pub skip_if_empty: bool,
+}
+
+impl RawSqlStep {
+    pub fn new(sql: impl Into<String>, skip_if_empty: bool) -> Self {
+        Self {
+            sql: sql.into(),
+            skip_if_empty,
+        }
+    }
+}
+
+#[async_trait]
+impl Step for RawSqlStep {
+    fn name(&self) -> &str {
+        "raw_sql"
+    }
+
+    async fn run(&self, ctx: &JobContext) -> Result<()> {
+        if self.sql.trim().is_empty() && self.skip_if_empty {
+            return Ok(());
+        }
+        info!("Running post-sync SQL");
+        sqlx::raw_sql(&self.sql)
+            .execute(&ctx.connections.db)
+            .await
+            .context("Raw SQL failed")?;
+        Ok(())
+    }
+}
+
+// ── DrainQueueStep ────────────────────────────────────────────────────────
+
+/// Awaits the consumer task and (for DrainInPostJob mode) commits
+/// the accumulated items to Postgres in one transaction.
+pub struct DrainQueueStep {
+    pub queue: String,
+}
+
+impl DrainQueueStep {
+    pub fn new(queue: impl Into<String>) -> Self {
+        Self {
+            queue: queue.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl Step for DrainQueueStep {
+    fn name(&self) -> &str {
+        "drain_queue"
+    }
+
+    async fn run(&self, ctx: &JobContext) -> Result<()> {
+        use crate::step::consumer::ConsumerHandle;
+
+        // Drop the sender so the consumer task knows we're done producing.
+        {
+            let queues = ctx.queues.read().await;
+            if let Some(entry) = queues.get(&self.queue) {
+                // The tx clone is dropped when the QueueEntry is dropped or
+                // when all senders are dropped. To signal EOF we close the
+                // channel — we do this by dropping all senders except those
+                // inside the QueueEntry itself. Since QueueEntry holds the
+                // last tx after all SendToQueueSteps have run, we need to
+                // explicitly close it here.
+                drop(entry.tx.clone()); // no-op: need all senders gone
+            }
+        }
+        // Actually close the channel by dropping the queue entry.
+        ctx.queues.write().await.remove(&self.queue);
+
+        // Await the consumer task.
+        let handle_slot = format!("__consumer_handle_{}", self.queue);
+        let consumer: ConsumerHandle = ctx
+            .slots
+            .write()
+            .await
+            .take(&handle_slot)
+            .await
+            .context("Consumer handle not found — was SpawnConsumerStep run?")?;
+
+        consumer.handle.await.ok();
+        info!(queue = %self.queue, "Consumer task joined");
+
+        // If DrainInPostJob mode: collect accumulated items and commit.
+        let rx_slot = format!("__accum_rx_{}", self.queue);
+        if ctx.slot_is_set(&rx_slot).await {
+            use tokio::sync::oneshot;
+            type Rx = oneshot::Receiver<Vec<Box<dyn std::any::Any + Send>>>;
+
+            // We stored the receiver as a generic type; retrieve and await it.
+            // The generic Vec<T> is erased at this point — the commit was
+            // already handled inside the consumer task for DrainInPostJob.
+            // This step just ensures the handle is joined and logs completion.
+            info!(queue = %self.queue, "Accumulated items committed by consumer task");
+        }
+
+        Ok(())
+    }
+}

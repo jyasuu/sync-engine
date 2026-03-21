@@ -1,58 +1,136 @@
 # user-sync/pipeline.toml
 #
-# Fully declarative pipeline config.
-# This file + schema.toml is all a new sync job author writes.
-# No secrets live here — all sensitive values are env vars.
+# Declarative pipeline configuration.
+# Each section maps directly to a job phase.
+# All sensitive values come from environment variables — never hardcoded here.
+#
+# ── Config value resolution ───────────────────────────────────────────────
+# Any string value can be:
+#
+#   "literal value"             — used as-is
+#   { env = "MY_ENV_VAR" }      — read from environment at startup, error if missing
+#   { env = "MY_VAR", default = "fallback" } — read from env, fallback if missing
+#
+# This means pipeline.toml is the single place that names every config knob.
+# No separate config.toml needed — the env keys ARE the documentation.
+# ─────────────────────────────────────────────────────────────────────────
 
-[pre_job.connections.db]
-type            = "postgres"
-url_env         = "SINK__DATABASE_URL"
+[job]
+name = "user-sync"
+
+# ── Slots ─────────────────────────────────────────────────────────────────
+# Declare all typed data channels shared between steps.
+# scope:
+#   window   — cleared at the start of each iterator tick
+#   job      — accumulates across all windows; readable in post_job
+#   pipeline — survives across cron ticks
+
+[slots]
+api_rows = { scope = "window" }   # Vec<ApiUser>  written by fetch, read by transform
+db_rows  = { scope = "window" }   # Vec<DbUser>   written by transform, read by tx_upsert
+
+# Pattern 2 — change to scope = "job" + move tx_upsert to post_loop_steps
+# Pattern 3 — keep window scope; consumer drains via queue
+
+# ── Pre-job ───────────────────────────────────────────────────────────────
+
+[[pre_job.steps]]
+type            = "pg_connect"
+url             = { env = "SINK__DATABASE_URL" }
 max_connections = 5
 
-[pre_job.connections.auth]
-type              = "oauth2_client_creds"
-token_url_env     = "AUTH__TOKEN_URL"
-client_id_env     = "AUTH__CLIENT_ID"
-client_secret_env = "AUTH__CLIENT_SECRET"
+[[pre_job.steps]]
+type          = "oauth2"
+token_url     = { env = "AUTH__TOKEN_URL" }
+client_id     = { env = "AUTH__CLIENT_ID" }
+client_secret = { env = "AUTH__CLIENT_SECRET" }
 
-[pre_job.connections.http]
-type           = "http"
+[[pre_job.steps]]
+type           = "http_client"
 timeout_secs   = 620
 keepalive_secs = 30
 
+# Pattern 3 — uncomment to spawn async consumer:
+# [[pre_job.steps]]
+# type        = "spawn_consumer"
+# queue       = "db_rows_queue"
+# model       = "DbUser"
+# commit_mode = "per_batch"    # or "drain_in_post_job"
+
+# ── Main job ──────────────────────────────────────────────────────────────
+
 [main_job.iterator]
 type           = "date_window"
-start_env      = "SOURCE__START_INTERVAL"
-end_env        = "SOURCE__END_INTERVAL"
-limit_env      = "SOURCE__INTERVAL_LIMIT"
-sleep_secs_env = "SOURCE__WINDOW_SLEEP_SECS"
+start_interval = { env = "SOURCE__START_INTERVAL",    default = "30" }
+end_interval   = { env = "SOURCE__END_INTERVAL",      default = "0" }
+interval_limit = { env = "SOURCE__INTERVAL_LIMIT",    default = "7" }
+sleep_secs     = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
 
 [main_job.retry]
 max_attempts = 5
 backoff_secs = 2
 
-[main_job.fetch]
-type           = "http_json"
-endpoint_env   = "SOURCE__USER_ENDPOINT"
-auth           = "auth"
-realm_type_env = "SOURCE__INCLUDE_REALM_TYPES"
+# Steps inside the retry loop — retried on failure.
 
-[main_job.transform]
-mapping = "UserTransform"
+[[main_job.retry_steps]]
+type       = "fetch_json"
+endpoint   = { env = "SOURCE__USER_ENDPOINT" }
+realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
+writes     = "api_rows"
+append     = false
 
-[main_job.sink]
-type  = "postgres_tx"
-db    = "db"
+[[main_job.retry_steps]]
+type   = "transform"
+reads  = "api_rows"
+writes = "db_rows"
+mapper = "UserTransform"
+append = false            # set true for pattern 2 (job-scope accumulation)
+
+# Pattern 1 — tx per window (active):
+[[main_job.retry_steps]]
+type  = "tx_upsert"
+reads = "db_rows"
 model = "DbUser"
+
+# Pattern 3 — replace tx_upsert with send_to_queue:
+# [[main_job.retry_steps]]
+# type  = "send_to_queue"
+# reads = "db_rows"
+# queue = "db_rows_queue"
+
+# Steps after each window, outside retry.
+
+[[main_job.post_window_steps]]
+type = "sleep"
+secs = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
+
+# Pattern 2 — bulk tx after all windows (runs once after iterator exhausted):
+# [[main_job.post_loop_steps]]
+# type  = "tx_upsert"
+# reads = "db_rows"
+# model = "DbUser"
+
+# ── Post-job ──────────────────────────────────────────────────────────────
 
 [[post_job.steps]]
 type = "log_summary"
 
 [[post_job.steps]]
 type          = "raw_sql"
-db            = "db"
-sql_env       = "SINK__SYNC_SQL"
+sql           = { env = "SINK__SYNC_SQL", default = "" }
 skip_if_empty = true
 
+# Pattern 3 — drain queue before logging:
+# [[post_job.steps]]
+# type  = "drain_queue"
+# queue = "db_rows_queue"
+
+# Custom Rust hook:
+# [[post_job.steps]]
+# type = "custom"
+# hook = "MyCustomHook"
+
+# ── Scheduler ─────────────────────────────────────────────────────────────
+
 [scheduler]
-cron_env = "SCHEDULER__CRON"
+cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }

@@ -54,30 +54,6 @@
 Defines the API record shape, DB target shape, and field mapping rules.  
 `build.rs` generates all Rust structs and trait implementations from this file.
 
-### `[record.DbUser]`  _DB target record_
-
-Table: `global_users` · Primary key: `pccuid` · Upsert: `true`  
-
-| Field | Type |
-|-------|------|
-| `pccuid` | `String` |
-| `sso_acct` | `String` |
-| `fact_no` | `String` |
-| `local_fact_no` | `String` |
-| `chinese_nm` | `String` |
-| `local_pnl_nm` | `String` |
-| `english_nm` | `String` |
-| `contact_mail` | `String` |
-| `sex` | `String` |
-| `lo_posi_nm` | `String` |
-| `disabled` | `String` |
-| `disabled_date` | `Option<DateTime<Utc>>` |
-| `update_date` | `DateTime<Utc>` |
-| `lo_dept_nm` | `String` |
-| `tel` | `String` |
-| `leave_mk` | `String` |
-| `acct_type` | `String` |
-
 ### `[record.ApiUser]`  _API source record_
 
 Response envelope field: `data`  
@@ -101,6 +77,30 @@ Response envelope field: `data`
 | `tel` | `Option<String>` |
 | `leaveMk` | `bool` |
 | `acctType` | `Option<String>` |
+
+### `[record.DbUser]`  _DB target record_
+
+Table: `global_users` · Primary key: `pccuid` · Upsert: `true`  
+
+| Field | Type |
+|-------|------|
+| `pccuid` | `String` |
+| `sso_acct` | `String` |
+| `fact_no` | `String` |
+| `local_fact_no` | `String` |
+| `chinese_nm` | `String` |
+| `local_pnl_nm` | `String` |
+| `english_nm` | `String` |
+| `contact_mail` | `String` |
+| `sex` | `String` |
+| `lo_posi_nm` | `String` |
+| `disabled` | `String` |
+| `disabled_date` | `Option<DateTime<Utc>>` |
+| `update_date` | `DateTime<Utc>` |
+| `lo_dept_nm` | `String` |
+| `tel` | `String` |
+| `leave_mk` | `String` |
+| `acct_type` | `String` |
 
 ### Mapping rules
 
