@@ -770,12 +770,12 @@ pub async fn run_post_job(
 /// Call from a business crate's main.rs:
 ///
 /// ```rust,no_run
+/// # use sync_engine::TypeRegistry;
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
-///     let mut reg = sync_engine::TypeRegistry::new();
-///     reg.register_envelope::<ApiUserResponse>("ApiUserResponse");
-///     reg.register_transform::<ApiUser, DbUser, UserTransform>("UserTransform");
-///     reg.register_model::<DbUser>("DbUser");
+///     let mut reg = TypeRegistry::new();
+///     // register_envelope / register_transform / register_model
+///     // with your generated types from schema.toml
 ///     sync_engine::run("pipeline.toml", reg).await
 /// }
 /// ```
@@ -838,6 +838,11 @@ async fn run_one_tick(
     ctx: &Arc<JobContext>,
     reg: &Arc<TypeRegistry>,
 ) -> Result<()> {
+    // Clear job-scoped slots at the start of every tick so summary counts
+    // from the previous run don't bleed into this one.
+    // Pipeline-scoped slots are intentionally NOT cleared — they survive ticks.
+    ctx.clear_job_slots().await;
+
     // Pre-job: spawn consumers if configured
     for step in &cfg.pre_job.steps {
         match step {

@@ -305,6 +305,12 @@ fn gen_rule_expr(field: &str, src: &str, rule: &str) -> String {
     }
 }
 
+/// Public wrapper for tests — exercises the rule expression generator.
+#[cfg(test)]
+pub fn gen_rule_expr_pub(field: &str, src: &str, rule: &str) -> String {
+    gen_rule_expr(field, src, rule)
+}
+
 // ── Public entry point ────────────────────────────────────────────────────
 
 pub fn generate(schema_path: impl AsRef<Path>) {
@@ -353,7 +359,7 @@ pub fn generate(schema_path: impl AsRef<Path>) {
 /// The skeleton uses case 1 (tx per window) as the default, with the other
 /// three patterns commented out inline.
 ///
-/// ```rust
+/// ```rust,no_run
 /// // user-sync/build.rs
 /// fn main() {
 ///     sync_engine::codegen::generate("schema.toml");

@@ -13,6 +13,9 @@ pub mod standard_job;
 pub mod step;
 pub mod transport;
 
+#[cfg(test)]
+mod tests;
+
 // ── Components ────────────────────────────────────────────────────────────
 pub use components::{
     auth::OAuth2Auth,
@@ -46,9 +49,9 @@ pub use transport::{RabbitmqConfig, RabbitmqConsumer, RabbitmqProducer, Rabbitmq
 
 // ── TypeRegistry + run() entry-point ─────────────────────────────────────
 pub use pipeline_runner::{
-    build_context, build_steps, build_window_cfg, run, validate, MainJobConfig, MainStepConfig,
-    PipelineConfig, PostJobConfig, PostStepConfig, PreJobConfig, QueueDef, ResourceDef,
-    SchedulerConfig, SlotDef,
+    build_context, build_steps, build_window_cfg, run, validate, IteratorConfig, MainJobConfig,
+    MainStepConfig, PipelineConfig, PostJobConfig, PostStepConfig, PreJobConfig, QueueDef,
+    ResourceDef, RetryConfig, SchedulerConfig, SlotDef, SlotScopeStr,
 };
 pub use registry::TypeRegistry;
 

@@ -54,30 +54,6 @@
 Defines the API record shape, DB target shape, and field mapping rules.  
 `build.rs` generates all Rust structs and trait implementations from this file.
 
-### `[record.ApiUser]`  _API source record_
-
-Response envelope field: `data`  
-
-| Field | Type |
-|-------|------|
-| `pccuid` | `String` |
-| `ssoAcct` | `String` |
-| `factNo` | `String` |
-| `localFactNo` | `Option<String>` |
-| `chineseNm` | `Option<String>` |
-| `localPnlNm` | `Option<String>` |
-| `englishNm` | `Option<String>` |
-| `contactMail` | `Option<String>` |
-| `sex` | `Option<bool>` |
-| `loPosiNm` | `Option<String>` |
-| `disabled` | `bool` |
-| `disabledDate` | `Option<i64>` |
-| `updateDate` | `i64` |
-| `loDeptNm` | `Option<String>` |
-| `tel` | `Option<String>` |
-| `leaveMk` | `bool` |
-| `acctType` | `Option<String>` |
-
 ### `[record.DbUser]`  _DB target record_
 
 Table: `global_users` · Primary key: `pccuid` · Upsert: `true`  
@@ -101,6 +77,30 @@ Table: `global_users` · Primary key: `pccuid` · Upsert: `true`
 | `tel` | `String` |
 | `leave_mk` | `String` |
 | `acct_type` | `String` |
+
+### `[record.ApiUser]`  _API source record_
+
+Response envelope field: `data`  
+
+| Field | Type |
+|-------|------|
+| `pccuid` | `String` |
+| `ssoAcct` | `String` |
+| `factNo` | `String` |
+| `localFactNo` | `Option<String>` |
+| `chineseNm` | `Option<String>` |
+| `localPnlNm` | `Option<String>` |
+| `englishNm` | `Option<String>` |
+| `contactMail` | `Option<String>` |
+| `sex` | `Option<bool>` |
+| `loPosiNm` | `Option<String>` |
+| `disabled` | `bool` |
+| `disabledDate` | `Option<i64>` |
+| `updateDate` | `i64` |
+| `loDeptNm` | `Option<String>` |
+| `tel` | `Option<String>` |
+| `leaveMk` | `bool` |
+| `acctType` | `Option<String>` |
 
 ### Mapping rules
 
