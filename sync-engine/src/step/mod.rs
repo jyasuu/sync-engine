@@ -49,6 +49,10 @@ impl StepRunner {
         self.steps.push(Box::new(step));
     }
 
+    pub fn push_boxed(&mut self, step: Box<dyn Step>) {
+        self.steps.push(step);
+    }
+
     pub async fn run_all(&self, ctx: &Arc<JobContext>) -> Result<()> {
         for step in &self.steps {
             tracing::debug!(step = step.name(), "Running step");

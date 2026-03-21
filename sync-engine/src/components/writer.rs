@@ -1,7 +1,7 @@
 // sync-engine/src/components/writer.rs
 use anyhow::Result;
 use async_trait::async_trait;
-use sqlx::{postgres::PgPoolOptions, PgPool, Postgres, Transaction};
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use tracing::{error, info, warn};
 
 use crate::pipeline::component_registry::{AnyPostHook, AnyWriter};
@@ -13,7 +13,7 @@ use crate::pipeline::Sink;
 /// Used by `PostgresWriter` for non-transactional batch writes.
 #[async_trait]
 pub trait Upsertable: Send + Sync + 'static {
-    async fn upsert(&self, pool: &PgPool) -> Result<()>;
+    async fn upsert(&self, pool: &sqlx::PgPool) -> Result<()>;
 }
 
 // ── UpsertableInTx (transaction) ──────────────────────────────────────────
@@ -22,7 +22,7 @@ pub trait Upsertable: Send + Sync + 'static {
 /// Used by `TxWriter` so an entire window is committed atomically.
 #[async_trait]
 pub trait UpsertableInTx: Send + Sync + 'static {
-    async fn upsert_in_tx(&self, tx: &mut Transaction<'_, Postgres>) -> Result<()>;
+    async fn upsert_in_tx(&self, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()>;
 }
 
 // ── PostgresWriter (pool-based) ───────────────────────────────────────────

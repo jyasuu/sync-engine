@@ -1,61 +1,81 @@
 # user-sync/pipeline.toml
 #
-# Declarative pipeline configuration.
-# Each section maps directly to a job phase.
-# All sensitive values come from environment variables — never hardcoded here.
+# Complete pipeline definition. No Rust code needed except main.rs
+# which registers the generated types by name.
 #
-# ── Config value resolution ───────────────────────────────────────────────
-# Any string value can be:
+# Switch patterns by changing:
+#   Case 1 (active): db_rows scope=window, tx_upsert inside [[main_job.retry_steps]]
+#   Case 2:          db_rows scope=job,    tx_upsert in [[main_job.post_loop_steps]], transform append=true
+#   Case 3:          replace [slots.db_rows] with [queues.db_rows] type="tokio",
+#                    add [[pre_job.steps]] type="spawn_consumer",
+#                    replace tx_upsert with send_to_queue in retry_steps
+#   Case 4:          [queues.db_rows] type="rabbitmq" + rabbitmq config
 #
-#   "literal value"             — used as-is
-#   { env = "MY_ENV_VAR" }      — read from environment at startup, error if missing
-#   { env = "MY_VAR", default = "fallback" } — read from env, fallback if missing
-#
-# This means pipeline.toml is the single place that names every config knob.
-# No separate config.toml needed — the env keys ARE the documentation.
-# ─────────────────────────────────────────────────────────────────────────
+# Config value syntax:
+#   "literal"                           used as-is
+#   { env = "VAR" }                     required env var
+#   { env = "VAR", default = "val" }    env var with fallback
 
 [job]
 name = "user-sync"
 
-# ── Slots ─────────────────────────────────────────────────────────────────
-# Declare all typed data channels shared between steps.
-# scope:
-#   window   — cleared at the start of each iterator tick
-#   job      — accumulates across all windows; readable in post_job
-#   pipeline — survives across cron ticks
+[job.scheduler]
+cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
 
-[slots]
-api_rows = { scope = "window" }   # Vec<ApiUser>  written by fetch, read by transform
-db_rows  = { scope = "window" }   # Vec<DbUser>   written by transform, read by tx_upsert
+# ── Resources ─────────────────────────────────────────────────────────────
+# Named connections. Engine builds them in dependency order.
 
-# Pattern 2 — change to scope = "job" + move tx_upsert to post_loop_steps
-# Pattern 3 — keep window scope; consumer drains via queue
-
-# ── Pre-job ───────────────────────────────────────────────────────────────
-
-[[pre_job.steps]]
-type            = "pg_connect"
+[resources.pg]
+type            = "postgres"
 url             = { env = "SINK__DATABASE_URL" }
 max_connections = 5
 
-[[pre_job.steps]]
+[resources.auth]
 type          = "oauth2"
 token_url     = { env = "AUTH__TOKEN_URL" }
 client_id     = { env = "AUTH__CLIENT_ID" }
 client_secret = { env = "AUTH__CLIENT_SECRET" }
 
-[[pre_job.steps]]
+[resources.http]
 type           = "http_client"
 timeout_secs   = 620
 keepalive_secs = 30
 
-# Pattern 3 — uncomment to spawn async consumer:
+[resources.svc]
+type       = "http_service"
+http       = "http"
+auth       = "auth"
+endpoint   = { env = "SOURCE__USER_ENDPOINT" }
+realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
+
+# ── Slots ─────────────────────────────────────────────────────────────────
+# Named typed data channels shared between steps.
+
+[slots.api_rows]
+type  = "ApiUser"   # schema.toml record name — for docs
+scope = "window"    # cleared at start of each window
+
+[slots.db_rows]
+type  = "DbUser"    # schema.toml record name — for docs
+scope = "window"    # case 1: window | case 2: change to "job"
+
+# Case 3/4 — replace [slots.db_rows] with:
+# [queues.db_rows]
+# type     = "tokio"       # or "rabbitmq"
+# capacity = 256
+
+# ── Pre-job ───────────────────────────────────────────────────────────────
+# init_resources = true builds all [resources] automatically.
+
+[pre_job]
+init_resources = true
+
+# Case 3/4 — add consumer:
 # [[pre_job.steps]]
 # type        = "spawn_consumer"
-# queue       = "db_rows_queue"
+# queue       = "db_rows"
 # model       = "DbUser"
-# commit_mode = "per_batch"    # or "drain_in_post_job"
+# commit_mode = "per_batch"   # or "drain_in_post_job"
 
 # ── Main job ──────────────────────────────────────────────────────────────
 
@@ -70,45 +90,44 @@ sleep_secs     = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
 max_attempts = 5
 backoff_secs = 2
 
-# Steps inside the retry loop — retried on failure.
+# Steps inside the retry loop — retried on failure per window.
 
 [[main_job.retry_steps]]
-type       = "fetch_json"
-endpoint   = { env = "SOURCE__USER_ENDPOINT" }
-realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
-writes     = "api_rows"
-append     = false
+type     = "fetch"
+envelope = "ApiUserResponse"   # registered in main.rs
+writes   = "api_rows"
+append   = false
 
 [[main_job.retry_steps]]
-type   = "transform"
-reads  = "api_rows"
-writes = "db_rows"
-mapper = "UserTransform"
-append = false            # set true for pattern 2 (job-scope accumulation)
+type      = "transform"
+transform = "UserTransform"    # registered in main.rs
+reads     = "api_rows"
+writes    = "db_rows"
+append    = false              # case 2: change to true
 
-# Pattern 1 — tx per window (active):
+# Case 1 (active): tx per window
 [[main_job.retry_steps]]
 type  = "tx_upsert"
+model = "DbUser"               # registered in main.rs
 reads = "db_rows"
-model = "DbUser"
 
-# Pattern 3 — replace tx_upsert with send_to_queue:
+# Case 3/4: replace tx_upsert with:
 # [[main_job.retry_steps]]
 # type  = "send_to_queue"
 # reads = "db_rows"
-# queue = "db_rows_queue"
+# queue = "db_rows"
 
-# Steps after each window, outside retry.
+# Steps after each window (outside retry loop).
 
 [[main_job.post_window_steps]]
 type = "sleep"
 secs = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
 
-# Pattern 2 — bulk tx after all windows (runs once after iterator exhausted):
+# Case 2: bulk tx after all windows — uncomment:
 # [[main_job.post_loop_steps]]
 # type  = "tx_upsert"
-# reads = "db_rows"
 # model = "DbUser"
+# reads = "db_rows"
 
 # ── Post-job ──────────────────────────────────────────────────────────────
 
@@ -120,17 +139,12 @@ type          = "raw_sql"
 sql           = { env = "SINK__SYNC_SQL", default = "" }
 skip_if_empty = true
 
-# Pattern 3 — drain queue before logging:
+# Case 3/4: drain queue before summary:
 # [[post_job.steps]]
 # type  = "drain_queue"
-# queue = "db_rows_queue"
+# queue = "db_rows"
 
-# Custom Rust hook:
+# Custom Rust hook registered in main.rs:
 # [[post_job.steps]]
 # type = "custom"
 # hook = "MyCustomHook"
-
-# ── Scheduler ─────────────────────────────────────────────────────────────
-
-[scheduler]
-cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }

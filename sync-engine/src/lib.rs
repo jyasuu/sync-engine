@@ -6,6 +6,7 @@ pub mod context;
 pub mod job;
 pub mod pipeline;
 pub mod pipeline_runner;
+pub mod registry;
 pub mod runner;
 pub mod slot;
 pub mod standard_job;
@@ -21,12 +22,12 @@ pub use components::{
     },
 };
 
-// ── Job traits ────────────────────────────────────────────────────────────
+// ── Job traits (kept for backwards compat) ────────────────────────────────
 pub use job::{
     run_job, with_retry, Connections, DateWindowIter, JobSummary, MainJob, PostJob, PreJob,
 };
 
-// ── New slot/context/step system ──────────────────────────────────────────
+// ── New step system ───────────────────────────────────────────────────────
 pub use config_value::{ConfigValue, EnvRef};
 pub use context::{Connections as JobConnections, JobContext, WindowMeta};
 pub use runner::{MainJobRunner, WindowConfig};
@@ -39,14 +40,16 @@ pub use step::sink::{SendToQueueStep, TxUpsertStep};
 pub use step::transform::TransformStep;
 pub use step::Step;
 
-// ── StandardJob (existing, kept for backwards compat) ─────────────────────
-pub use standard_job::{HasConnections, HasIteratorCfg, HasRetryCfg, StandardJob};
-
-// ── Pipeline runner ───────────────────────────────────────────────────────
+// ── TypeRegistry + run() entry-point ─────────────────────────────────────
 pub use pipeline_runner::{
-    run_from_pipeline_toml, PipelineConfig, PostJobExecutor, ResolvedIteratorCfg,
-    StandardConnections,
+    build_context, build_steps, build_window_cfg, run, MainJobConfig, MainStepConfig,
+    PipelineConfig, PostJobConfig, PostStepConfig, PreJobConfig, QueueDef, ResourceDef,
+    SchedulerConfig, SlotDef,
 };
+pub use registry::TypeRegistry;
+
+// ── StandardJob (kept for backwards compat) ───────────────────────────────
+pub use standard_job::{HasConnections, HasIteratorCfg, HasRetryCfg, StandardJob};
 
 // ── Pipeline primitives ───────────────────────────────────────────────────
 pub use pipeline::adapters::TransformAdapter;

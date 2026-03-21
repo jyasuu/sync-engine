@@ -1,22 +1,19 @@
 // user-sync/src/main.rs
 //
-// Loads pipeline.toml, parses it into PipelineConfig, and drives the
-// scheduled job. The cron expression, all connections, and all step wiring
-// come from pipeline.toml — this file never needs to change.
+// The ONLY Rust file in user-sync.
+// Registers generated types by name so the engine can instantiate them
+// from pipeline.toml. Everything else is configuration.
 
 mod generated;
-mod job;
 
-use anyhow::Result;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio_cron_scheduler::{Job, JobScheduler};
-
-use job::UserSyncJob;
-use sync_engine::{pipeline_runner::PipelineConfig, run_job};
+use generated::{
+    envelopes::ApiUserResponse,
+    records::{ApiUser, DbUser},
+    transforms::UserTransform,
+};
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     tracing_subscriber::fmt()
@@ -26,42 +23,22 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let raw = std::fs::read_to_string("pipeline.toml").expect("Cannot read pipeline.toml");
-    let pipeline_cfg: PipelineConfig = toml::from_str(&raw).expect("Cannot parse pipeline.toml");
+    let mut registry = sync_engine::TypeRegistry::new();
 
-    let cron = pipeline_cfg
-        .scheduler
-        .cron
-        .resolve()
-        .expect("SCHEDULER__CRON not set");
+    // Register every generated type by its schema.toml name.
+    // These names must match what's written in pipeline.toml:
+    //   envelope = "ApiUserResponse"
+    //   transform = "UserTransform"
+    //   model = "DbUser"
+    registry.register_envelope::<ApiUserResponse>("ApiUserResponse");
+    registry.register_transform::<ApiUser, DbUser, UserTransform>("UserTransform");
+    registry.register_model::<DbUser>("DbUser");
 
-    let cfg_arc = Arc::new(pipeline_cfg);
-    let lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+    // Optional: register a custom post-job hook
+    // registry.register_post_hook("MyCustomHook", |ctx| async move {
+    //     tracing::info!("Custom hook running");
+    //     Ok(())
+    // });
 
-    let mut scheduler = JobScheduler::new().await?;
-
-    scheduler
-        .add(Job::new_async(cron.as_str(), move |_, _| {
-            let cfg = Arc::clone(&cfg_arc);
-            let lock = Arc::clone(&lock);
-            Box::pin(async move {
-                let _guard = match lock.try_lock() {
-                    Ok(g) => g,
-                    Err(_) => {
-                        tracing::debug!("Previous job still running — skipping tick");
-                        return;
-                    }
-                };
-                if let Err(e) = run_job::<UserSyncJob, _, _>(cfg.as_ref()).await {
-                    tracing::error!(error = %e, "Job failed");
-                }
-            })
-        })?)
-        .await?;
-
-    scheduler.start().await?;
-    tracing::info!("user-sync scheduled ({})", cron);
-    tokio::signal::ctrl_c().await?;
-    scheduler.shutdown().await?;
-    Ok(())
+    sync_engine::run("pipeline.toml", registry).await
 }

@@ -31,8 +31,7 @@ pub enum SlotScope {
 
 pub struct SlotEntry {
     pub scope: SlotScope,
-    /// None = slot declared but not yet written.
-    value: Option<Arc<RwLock<Box<dyn Any + Send + Sync>>>>,
+    pub(crate) value: Option<Arc<RwLock<Box<dyn Any + Send + Sync>>>>,
 }
 
 impl SlotEntry {
@@ -45,7 +44,7 @@ impl SlotEntry {
 
 #[derive(Default)]
 pub struct SlotMap {
-    slots: HashMap<String, SlotEntry>,
+    pub(crate) slots: HashMap<String, SlotEntry>,
 }
 
 impl SlotMap {

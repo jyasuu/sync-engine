@@ -2362,8 +2362,6 @@ dependencies = [
  "sqlx",
  "sync-engine",
  "tokio",
- "tokio-cron-scheduler",
- "toml",
  "tracing",
  "tracing-subscriber",
 ]

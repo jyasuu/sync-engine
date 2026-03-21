@@ -1,18 +1,20 @@
 // sync-engine/src/pipeline_runner.rs
 //
-// Parses the new pipeline.toml format (step-based, ConfigValue-aware) and
-// assembles a JobContext + MainJobRunner ready to execute.
+// New TOML schema — four sections map 1:1 to the job pseudocode:
+//   [resources]       — named connections (pg, auth, http, svc)
+//   [slots] / [queues]— named typed data channels
+//   [pre_job]         — init_resources + optional consumer spawn
+//   [main_job]        — iterator, retry, [[retry_steps]], post_window, post_loop
+//   [post_job]        — [[steps]]
+//   [job]             — name, [job.scheduler]
 //
-// run_from_pipeline_toml — the single entry-point for a business crate's
-// main.rs. Reads pipeline.toml, builds everything, wires the cron scheduler
-// with mutex-skip, and drives run_job on each tick.
+// run(path, registry) — the single entry-point for a business crate's main.rs.
 
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -22,96 +24,53 @@ use tracing::info;
 use crate::components::auth::OAuth2Auth;
 use crate::config_value::ConfigValue;
 use crate::context::{Connections, JobContext};
-use crate::job::JobSummary;
-use crate::runner::WindowConfig;
+use crate::registry::TypeRegistry;
+use crate::runner::{MainJobRunner, WindowConfig};
 use crate::slot::SlotScope;
+use crate::step::consumer::CommitMode;
+use crate::step::control::{DrainQueueStep, LogSummaryStep, RawSqlStep, SleepStep};
+use crate::step::StepRunner;
 
-// ── Re-export for backwards compat ────────────────────────────────────────
-
+// ── Re-exports for backwards compat ───────────────────────────────────────
 pub use crate::context::Connections as StandardConnections;
-
-/// Config struct that satisfies the old HasIteratorCfg / HasRetryCfg traits.
-pub struct ResolvedIteratorCfg {
-    pub start_interval: i64,
-    pub end_interval: i64,
-    pub interval_limit: i64,
-    pub window_sleep_secs: u64,
-    pub max_attempts: usize,
-    pub base_backoff_secs: u64,
-}
-
-impl crate::standard_job::HasIteratorCfg for ResolvedIteratorCfg {
-    fn start_interval(&self) -> i64 {
-        self.start_interval
-    }
-    fn end_interval(&self) -> i64 {
-        self.end_interval
-    }
-    fn interval_limit(&self) -> i64 {
-        self.interval_limit
-    }
-    fn window_sleep_secs(&self) -> u64 {
-        self.window_sleep_secs
-    }
-}
-impl crate::standard_job::HasRetryCfg for ResolvedIteratorCfg {
-    fn max_attempts(&self) -> usize {
-        self.max_attempts
-    }
-    fn base_backoff_secs(&self) -> u64 {
-        self.base_backoff_secs
-    }
-}
 
 // ── TOML schema ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct PipelineConfig {
     pub job: Option<JobMeta>,
-    pub slots: Option<HashMap<String, SlotDef>>,
+    #[serde(default)]
+    pub resources: HashMap<String, ResourceDef>,
+    #[serde(default)]
+    pub slots: HashMap<String, SlotDef>,
+    #[serde(default)]
+    pub queues: HashMap<String, QueueDef>,
     pub pre_job: PreJobConfig,
     pub main_job: MainJobConfig,
     pub post_job: PostJobConfig,
-    pub scheduler: SchedulerConfig,
 }
+
+// ── [job] ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct JobMeta {
     pub name: Option<String>,
+    pub scheduler: Option<SchedulerConfig>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SlotDef {
-    pub scope: SlotScopeStr,
+pub struct SchedulerConfig {
+    pub cron: ConfigValue,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SlotScopeStr {
-    Window,
-    Job,
-    Pipeline,
-}
-
-impl From<SlotScopeStr> for SlotScope {
-    fn from(s: SlotScopeStr) -> Self {
-        match s {
-            SlotScopeStr::Window => SlotScope::Window,
-            SlotScopeStr::Job => SlotScope::Job,
-            SlotScopeStr::Pipeline => SlotScope::Pipeline,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PreJobConfig {
-    pub steps: Vec<PreStepConfig>,
-}
+// ── [resources] ───────────────────────────────────────────────────────────
+// Each entry is a named, typed connection. The engine instantiates them
+// in dependency order before pre_job steps run.
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum PreStepConfig {
-    PgConnect {
+pub enum ResourceDef {
+    Postgres {
         url: ConfigValue,
         #[serde(default = "default_max_conn")]
         max_connections: u32,
@@ -127,18 +86,14 @@ pub enum PreStepConfig {
         #[serde(default = "default_keepalive")]
         keepalive_secs: u64,
     },
-    SpawnConsumer {
-        queue: String,
-        model: String,
-        commit_mode: CommitModeStr,
-        accum_slot: Option<String>,
-        #[serde(default = "default_queue_cap")]
-        capacity: usize,
-    },
-    RegisterQueue {
-        name: String,
-        #[serde(default = "default_queue_cap")]
-        capacity: usize,
+    HttpService {
+        /// Name of the http_client resource to use
+        http: String,
+        /// Name of the oauth2 resource to use
+        auth: String,
+        endpoint: ConfigValue,
+        #[serde(default)]
+        realm_type: Option<ConfigValue>,
     },
 }
 
@@ -151,8 +106,77 @@ fn default_timeout() -> u64 {
 fn default_keepalive() -> u64 {
     30
 }
+
+// ── [slots] ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct SlotDef {
+    /// Schema.toml record name — for documentation only at runtime.
+    #[serde(rename = "type")]
+    pub record_type: Option<String>,
+    pub scope: SlotScopeStr,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotScopeStr {
+    Window,
+    Job,
+    Pipeline,
+}
+
+impl From<&SlotScopeStr> for SlotScope {
+    fn from(s: &SlotScopeStr) -> Self {
+        match s {
+            SlotScopeStr::Window => SlotScope::Window,
+            SlotScopeStr::Job => SlotScope::Job,
+            SlotScopeStr::Pipeline => SlotScope::Pipeline,
+        }
+    }
+}
+
+// ── [queues] ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum QueueDef {
+    Tokio {
+        #[serde(default = "default_queue_cap")]
+        capacity: usize,
+    },
+    Rabbitmq {
+        url: ConfigValue,
+        exchange: ConfigValue,
+        routing_key: ConfigValue,
+    },
+}
 fn default_queue_cap() -> usize {
     256
+}
+
+// ── [pre_job] ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct PreJobConfig {
+    /// If true, the engine builds all [resources] before pre_job steps.
+    #[serde(default = "default_true")]
+    pub init_resources: bool,
+    #[serde(default)]
+    pub steps: Vec<PreStepConfig>,
+}
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PreStepConfig {
+    SpawnConsumer {
+        queue: String,
+        model: String,
+        commit_mode: CommitModeStr,
+        accum_slot: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -161,6 +185,8 @@ pub enum CommitModeStr {
     PerBatch,
     DrainInPostJob,
 }
+
+// ── [main_job] ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct MainJobConfig {
@@ -175,6 +201,8 @@ pub struct MainJobConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct IteratorConfig {
+    #[serde(rename = "type")]
+    pub iter_type: String,
     pub start_interval: ConfigValue,
     pub end_interval: ConfigValue,
     pub interval_limit: ConfigValue,
@@ -195,41 +223,35 @@ fn default_backoff() -> u64 {
     2
 }
 
+/// A step entry in [[main_job.retry_steps]] or [[main_job.post_loop_steps]].
+/// The `type` field drives dispatch; all other fields are passed as `params`.
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum MainStepConfig {
-    FetchJson {
-        endpoint: ConfigValue,
-        #[serde(default)]
-        realm_type: Option<ConfigValue>,
-        writes: String,
-        #[serde(default)]
-        append: bool,
-    },
-    Transform {
-        reads: String,
-        writes: String,
-        mapper: String,
-        #[serde(default)]
-        append: bool,
-    },
-    TxUpsert {
-        reads: String,
-        model: String,
-    },
-    SendToQueue {
-        reads: String,
-        queue: String,
-    },
-    Sleep {
-        secs: ConfigValue,
-    },
-    RawSql {
-        sql: ConfigValue,
-        #[serde(default)]
-        skip_if_empty: bool,
-    },
+pub struct MainStepConfig {
+    #[serde(rename = "type")]
+    pub step_type: String,
+    /// The envelope type name for type="fetch" (e.g. "ApiUserResponse")
+    pub envelope: Option<String>,
+    /// The transform type name for type="transform" (e.g. "UserTransform")
+    pub transform: Option<String>,
+    /// The model type name for type="tx_upsert" (e.g. "DbUser")
+    pub model: Option<String>,
+    #[serde(default)]
+    pub reads: Option<String>,
+    #[serde(default)]
+    pub writes: Option<String>,
+    #[serde(default)]
+    pub append: bool,
+    /// For type="sleep"
+    pub secs: Option<ConfigValue>,
+    /// For type="raw_sql"
+    pub sql: Option<ConfigValue>,
+    #[serde(default)]
+    pub skip_if_empty: bool,
+    /// For type="send_to_queue"
+    pub queue: Option<String>,
 }
+
+// ── [post_job] ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct PostJobConfig {
@@ -253,46 +275,19 @@ pub enum PostStepConfig {
     },
 }
 
-#[derive(Debug, Deserialize)]
-pub struct SchedulerConfig {
-    pub cron: ConfigValue,
+// ── Built connections ─────────────────────────────────────────────────────
+
+/// Resolved at startup from [resources].
+pub struct BuiltResources {
+    pub db: Option<sqlx::PgPool>,
+    pub http: Option<Client>,
+    pub auth: Option<Arc<OAuth2Auth>>,
+    pub endpoint: String,
+    pub extra_query: Vec<(String, String)>,
 }
 
-// ── PostJobExecutor (kept for custom hooks) ───────────────────────────────
+// ── build_context ─────────────────────────────────────────────────────────
 
-pub struct PostJobExecutor {
-    pub steps: Vec<PostStepConfig>,
-    pub custom_hooks: HashMap<
-        String,
-        Box<
-            dyn Fn(JobSummary) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send>>
-                + Send
-                + Sync,
-        >,
-    >,
-}
-
-impl PostJobExecutor {
-    pub fn new(steps: Vec<PostStepConfig>) -> Self {
-        Self {
-            steps,
-            custom_hooks: HashMap::new(),
-        }
-    }
-    pub fn register_hook<F, Fut>(&mut self, name: &str, f: F)
-    where
-        F: Fn(JobSummary) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<()>> + Send + 'static,
-    {
-        self.custom_hooks
-            .insert(name.to_owned(), Box::new(move |s| Box::pin(f(s))));
-    }
-}
-
-// ── Context builder ───────────────────────────────────────────────────────
-
-/// Build a JobContext from the [pre_job] section of pipeline.toml.
-/// Establishes connections and declares slots.
 pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
     let job_name = cfg
         .job
@@ -301,163 +296,174 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
         .unwrap_or("unnamed")
         .to_owned();
 
-    // ── Resolve connections from pre_job steps ────────────────────────────
-    let mut db_pool: Option<sqlx::PgPool> = None;
-    let mut auth_opt: Option<Arc<OAuth2Auth>> = None;
-    let mut endpoint_str = String::new();
+    // ── Build resources in dependency order ───────────────────────────────
+    // Pass 1: http_client (no deps)
+    let mut http_clients: HashMap<String, Client> = HashMap::new();
+    let mut auth_clients: HashMap<String, Arc<OAuth2Auth>> = HashMap::new();
+    let mut db_pools: HashMap<String, sqlx::PgPool> = HashMap::new();
+    let mut endpoint = String::new();
     let mut extra_query: Vec<(String, String)> = Vec::new();
 
-    // Build http first (needed for oauth2)
-    let http = {
-        let mut timeout_secs = 620u64;
-        let mut keepalive_secs = 30u64;
-        for step in &cfg.pre_job.steps {
-            if let PreStepConfig::HttpClient {
-                timeout_secs: t,
-                keepalive_secs: k,
-            } = step
-            {
-                timeout_secs = *t;
-                keepalive_secs = *k;
-            }
-        }
-        Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
-            .tcp_keepalive(Duration::from_secs(keepalive_secs))
-            .build()
-            .context("HTTP client build failed")?
-    };
-
-    for step in &cfg.pre_job.steps {
-        match step {
-            PreStepConfig::PgConnect {
-                url,
-                max_connections,
-            } => {
-                let url_str = url.resolve()?;
-                info!("pre_job: connecting to postgres");
-                db_pool = Some(
-                    PgPoolOptions::new()
-                        .max_connections(*max_connections)
-                        .connect(&url_str)
-                        .await
-                        .context("Postgres connect failed")?,
-                );
-            }
-            PreStepConfig::Oauth2 {
-                token_url,
-                client_id,
-                client_secret,
-            } => {
-                info!("pre_job: creating oauth2 client");
-                auth_opt = Some(Arc::new(OAuth2Auth::new(
-                    http.clone(),
-                    token_url.resolve()?,
-                    client_id.resolve()?,
-                    client_secret.resolve()?,
-                )));
-            }
-            PreStepConfig::HttpClient { .. } => { /* already handled above */ }
-            _ => { /* queues + consumers handled after context is built */ }
+    for (name, def) in &cfg.resources {
+        if let ResourceDef::HttpClient {
+            timeout_secs,
+            keepalive_secs,
+        } = def
+        {
+            info!("resource[{}]: building http_client", name);
+            let client = Client::builder()
+                .timeout(Duration::from_secs(*timeout_secs))
+                .tcp_keepalive(Duration::from_secs(*keepalive_secs))
+                .build()
+                .context("HTTP client build failed")?;
+            http_clients.insert(name.clone(), client);
         }
     }
 
-    // Resolve endpoint from main_job fetch step
-    for step in &cfg.main_job.retry_steps {
-        if let MainStepConfig::FetchJson {
-            endpoint,
+    // Pass 2: oauth2 (needs http)
+    for (name, def) in &cfg.resources {
+        if let ResourceDef::Oauth2 {
+            token_url,
+            client_id,
+            client_secret,
+        } = def
+        {
+            // Use the first available http client
+            let http = http_clients
+                .values()
+                .next()
+                .cloned()
+                .unwrap_or_else(|| Client::new());
+            info!("resource[{}]: building oauth2 client", name);
+            auth_clients.insert(
+                name.clone(),
+                Arc::new(OAuth2Auth::new(
+                    http,
+                    token_url.resolve()?,
+                    client_id.resolve()?,
+                    client_secret.resolve()?,
+                )),
+            );
+        }
+    }
+
+    // Pass 3: postgres
+    for (name, def) in &cfg.resources {
+        if let ResourceDef::Postgres {
+            url,
+            max_connections,
+        } = def
+        {
+            info!("resource[{}]: connecting to postgres", name);
+            let pool = PgPoolOptions::new()
+                .max_connections(*max_connections)
+                .connect(&url.resolve()?)
+                .await
+                .context("Postgres connect failed")?;
+            db_pools.insert(name.clone(), pool);
+        }
+    }
+
+    // Pass 4: http_service (endpoint + realm_type)
+    for (_name, def) in &cfg.resources {
+        if let ResourceDef::HttpService {
+            endpoint: ep,
             realm_type,
             ..
-        } = step
+        } = def
         {
-            endpoint_str = endpoint.resolve()?;
+            endpoint = ep.resolve()?;
             if let Some(rt) = realm_type {
                 let v = rt.resolve().unwrap_or_default();
                 if !v.is_empty() {
                     extra_query.push(("realm_type".to_owned(), v));
                 }
             }
-            break;
         }
     }
 
-    let db = db_pool.ok_or_else(|| anyhow!("No pg_connect step in pre_job"))?;
-    let auth = auth_opt.ok_or_else(|| anyhow!("No oauth2 step in pre_job"))?;
+    let db = db_pools
+        .into_values()
+        .next()
+        .ok_or_else(|| anyhow!("No postgres resource defined"))?;
+    let auth = auth_clients
+        .into_values()
+        .next()
+        .ok_or_else(|| anyhow!("No oauth2 resource defined"))?;
+    let http = http_clients
+        .into_values()
+        .next()
+        .ok_or_else(|| anyhow!("No http_client resource defined"))?;
 
     let connections = Connections {
         db,
         auth,
         http,
-        endpoint: endpoint_str,
+        endpoint,
         extra_query,
     };
 
-    // ── Config map (resolved iterator values) ─────────────────────────────
+    // ── Config map ────────────────────────────────────────────────────────
     let iter = &cfg.main_job.iterator;
     let mut config = HashMap::new();
     config.insert(
-        "iterator.start_interval".to_owned(),
+        "iterator.start_interval".into(),
         iter.start_interval.resolve()?,
     );
+    config.insert("iterator.end_interval".into(), iter.end_interval.resolve()?);
     config.insert(
-        "iterator.end_interval".to_owned(),
-        iter.end_interval.resolve()?,
-    );
-    config.insert(
-        "iterator.interval_limit".to_owned(),
+        "iterator.interval_limit".into(),
         iter.interval_limit.resolve()?,
     );
-    config.insert("iterator.sleep_secs".to_owned(), iter.sleep_secs.resolve()?);
+    config.insert("iterator.sleep_secs".into(), iter.sleep_secs.resolve()?);
 
     let ctx = Arc::new(JobContext::new(connections, config, job_name));
 
-    // ── Declare slots ─────────────────────────────────────────────────────
+    // ── Declare summary slots (always present) ────────────────────────────
     {
-        let mut slot_map = ctx.slots.write().await;
+        let mut slots = ctx.slots.write().await;
+        slots.declare("summary.windows_processed", SlotScope::Job);
+        slots.declare("summary.error_count", SlotScope::Job);
+        slots.declare("summary.total_fetched", SlotScope::Job);
+        slots.declare("summary.total_upserted", SlotScope::Job);
+        slots.declare("summary.total_skipped", SlotScope::Job);
+        slots.declare("window.fetched", SlotScope::Window);
+        slots.declare("window.upserted", SlotScope::Window);
+        slots.declare("window.skipped", SlotScope::Window);
 
-        // Always declare summary slots — steps write/read these regardless
-        // of what the user declares in pipeline.toml [slots].
-        slot_map.declare("summary.windows_processed", SlotScope::Job);
-        slot_map.declare("summary.error_count", SlotScope::Job);
-        slot_map.declare("summary.total_fetched", SlotScope::Job);
-        slot_map.declare("summary.total_upserted", SlotScope::Job);
-        slot_map.declare("summary.total_skipped", SlotScope::Job);
-        slot_map.declare("window.fetched", SlotScope::Window);
-        slot_map.declare("window.upserted", SlotScope::Window);
-        slot_map.declare("window.skipped", SlotScope::Window);
-
-        // User-declared slots from pipeline.toml [slots]
-        if let Some(slots) = &cfg.slots {
-            for (key, def) in slots {
-                let scope = match def.scope {
-                    SlotScopeStr::Window => SlotScope::Window,
-                    SlotScopeStr::Job => SlotScope::Job,
-                    SlotScopeStr::Pipeline => SlotScope::Pipeline,
-                };
-                slot_map.declare(key, scope);
-            }
+        // User-declared slots from [slots]
+        for (key, def) in &cfg.slots {
+            slots.declare(key, SlotScope::from(&def.scope));
         }
     }
 
-    // ── Register queues ───────────────────────────────────────────────────
-    for step in &cfg.pre_job.steps {
-        match step {
-            PreStepConfig::RegisterQueue { name, capacity } => {
+    // ── Register queues from [queues] ─────────────────────────────────────
+    for (name, def) in &cfg.queues {
+        match def {
+            QueueDef::Tokio { capacity } => {
                 ctx.register_queue(name, *capacity).await;
+                info!("queue[{}]: tokio mpsc, capacity={}", name, capacity);
             }
-            PreStepConfig::SpawnConsumer {
-                queue, capacity, ..
+            QueueDef::Rabbitmq {
+                url,
+                exchange,
+                routing_key,
             } => {
-                ctx.register_queue(queue, *capacity).await;
+                // RabbitMQ integration point — registered as a named queue
+                // for now; full amqp transport can be plugged in here.
+                let _url = url.resolve()?;
+                let _exchange = exchange.resolve()?;
+                let _rk = routing_key.resolve()?;
+                tracing::warn!(queue = %name, "RabbitMQ transport not yet implemented — using tokio fallback");
+                ctx.register_queue(name, 256).await;
             }
-            _ => {}
         }
     }
 
     Ok(ctx)
 }
 
-/// Build window config from the parsed iterator + retry sections.
+/// Build window config from parsed iterator + retry sections.
 pub fn build_window_cfg(cfg: &PipelineConfig) -> Result<WindowConfig> {
     let iter = &cfg.main_job.iterator;
     Ok(WindowConfig {
@@ -470,28 +476,169 @@ pub fn build_window_cfg(cfg: &PipelineConfig) -> Result<WindowConfig> {
     })
 }
 
-// ── run_from_pipeline_toml ────────────────────────────────────────────────
+/// Build typed steps from a slice of MainStepConfig using the TypeRegistry.
+pub fn build_steps(steps: &[MainStepConfig], registry: &TypeRegistry) -> Result<StepRunner> {
+    let mut runner = StepRunner::new();
+    for s in steps {
+        let mut params = HashMap::new();
+        if let Some(ref r) = s.reads {
+            params.insert("reads".into(), r.clone());
+        }
+        if let Some(ref w) = s.writes {
+            params.insert("writes".into(), w.clone());
+        }
+        if s.append {
+            params.insert("append".into(), "true".into());
+        }
 
-/// Single entry-point for a business crate's main.rs.
+        match s.step_type.as_str() {
+            "fetch" => {
+                let env = s
+                    .envelope
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("fetch step missing `envelope` field"))?;
+                runner.push_boxed(registry.build_fetch(env, &params)?);
+            }
+            "transform" => {
+                let xfm = s
+                    .transform
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("transform step missing `transform` field"))?;
+                runner.push_boxed(registry.build_transform(xfm, &params)?);
+            }
+            "tx_upsert" => {
+                let model = s
+                    .model
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("tx_upsert step missing `model` field"))?;
+                runner.push_boxed(registry.build_model_sink(model, &params)?);
+            }
+            "send_to_queue" => {
+                let reads = s.reads.clone().unwrap_or_else(|| "db_rows".into());
+                let queue = s
+                    .queue
+                    .clone()
+                    .ok_or_else(|| anyhow!("send_to_queue step missing `queue` field"))?;
+                // SendToQueueStep is not model-typed — it sends Box<dyn Any>
+                // The queue consumer will downcast on the other end.
+                // We use a raw step here because we don't have the type at this level.
+                runner.push_boxed(Box::new(RawSendStep { reads, queue }));
+            }
+            "sleep" => {
+                let secs = s
+                    .secs
+                    .as_ref()
+                    .map(|v| v.resolve_as::<u64>())
+                    .transpose()?
+                    .unwrap_or(60);
+                runner.push(SleepStep::new(secs));
+            }
+            "raw_sql" => {
+                let sql = s
+                    .sql
+                    .as_ref()
+                    .map(|v| v.resolve())
+                    .transpose()?
+                    .unwrap_or_default();
+                runner.push(RawSqlStep::new(sql, s.skip_if_empty));
+            }
+            other => {
+                return Err(anyhow!("Unknown step type \"{other}\" in pipeline.toml"));
+            }
+        }
+    }
+    Ok(runner)
+}
+
+// ── RawSendStep ───────────────────────────────────────────────────────────
+// Placeholder for send_to_queue when no typed model factory is available.
+// The real typed version is built by TypeRegistry::build_queue_send (future).
+
+use crate::step::Step;
+use async_trait::async_trait;
+
+struct RawSendStep {
+    reads: String,
+    queue: String,
+}
+
+#[async_trait]
+impl Step for RawSendStep {
+    fn name(&self) -> &str {
+        "send_to_queue"
+    }
+    async fn run(&self, _ctx: &JobContext) -> Result<()> {
+        tracing::warn!(
+            slot  = %self.reads,
+            queue = %self.queue,
+            "send_to_queue requires registry.register_model — step skipped"
+        );
+        Ok(())
+    }
+}
+
+// ── PostJobExecutor ───────────────────────────────────────────────────────
+
+pub async fn run_post_job(
+    cfg: &PostJobConfig,
+    ctx: &Arc<JobContext>,
+    registry: &TypeRegistry,
+) -> Result<()> {
+    for step in &cfg.steps {
+        match step {
+            PostStepConfig::LogSummary => {
+                LogSummaryStep.run(ctx).await?;
+            }
+            PostStepConfig::RawSql { sql, skip_if_empty } => {
+                let s = sql.resolve().unwrap_or_default();
+                RawSqlStep::new(s, *skip_if_empty).run(ctx).await?;
+            }
+            PostStepConfig::DrainQueue { queue } => {
+                DrainQueueStep::new(queue).run(ctx).await?;
+            }
+            PostStepConfig::Custom { hook } => {
+                if let Some(f) = registry.get_post_hook(hook) {
+                    f(Arc::clone(ctx)).await?;
+                } else {
+                    tracing::warn!(hook = %hook, "Custom hook not registered — skipping");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── run() — the single entry-point ───────────────────────────────────────
+
+/// Call from a business crate's main.rs:
 ///
-/// The `job_factory` receives the parsed config and a pre-built `Arc<JobContext>`
-/// and returns a future that drives one full job execution.
-///
-/// For the simple typed path (StandardJob), use the convenience wrapper
-/// `run_typed_from_pipeline_toml` below.
-pub async fn run_from_pipeline_toml<F, Fut>(path: &str, job_factory: F) -> Result<()>
-where
-    F: Fn(Arc<PipelineConfig>, Arc<JobContext>) -> Fut + Send + Sync + Clone + 'static,
-    Fut: Future<Output = Result<()>> + Send + 'static,
-{
+/// ```rust,no_run
+/// #[tokio::main]
+/// async fn main() -> anyhow::Result<()> {
+///     let mut reg = sync_engine::TypeRegistry::new();
+///     reg.register_envelope::<ApiUserResponse>("ApiUserResponse");
+///     reg.register_transform::<ApiUser, DbUser, UserTransform>("UserTransform");
+///     reg.register_model::<DbUser>("DbUser");
+///     sync_engine::run("pipeline.toml", reg).await
+/// }
+/// ```
+pub async fn run(path: &str, registry: TypeRegistry) -> Result<()> {
     let raw = std::fs::read_to_string(path).with_context(|| format!("Cannot read {path}"))?;
-    let pipeline_cfg: PipelineConfig =
+    let cfg: PipelineConfig =
         toml::from_str(&raw).with_context(|| format!("Cannot parse {path}"))?;
 
-    let cron = pipeline_cfg.scheduler.cron.resolve()?;
-    let cfg = Arc::new(pipeline_cfg);
+    let cron = cfg
+        .job
+        .as_ref()
+        .and_then(|j| j.scheduler.as_ref())
+        .map(|s| s.cron.resolve())
+        .transpose()?
+        .unwrap_or_else(|| "0 */30 * * * *".to_owned());
 
-    // Build context once per scheduler lifecycle (Pipeline-scoped slots persist)
+    let cfg = Arc::new(cfg);
+    let reg = Arc::new(registry);
+
+    // Build context once — pipeline-scoped slots survive cron ticks
     let ctx = build_context(&cfg).await?;
 
     let lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
@@ -501,26 +648,70 @@ where
         .add(Job::new_async(cron.as_str(), move |_, _| {
             let cfg = Arc::clone(&cfg);
             let ctx = Arc::clone(&ctx);
+            let reg = Arc::clone(&reg);
             let lock = Arc::clone(&lock);
-            let factory = job_factory.clone();
             Box::pin(async move {
                 let _guard = match lock.try_lock() {
                     Ok(g) => g,
                     Err(_) => {
-                        tracing::debug!("Previous job still running — skipping tick");
+                        tracing::debug!("Previous job running — skipping");
                         return;
                     }
                 };
-                if let Err(e) = factory(cfg, ctx).await {
-                    tracing::error!(error = %e, "Job failed");
+                if let Err(e) = run_one_tick(&cfg, &ctx, &reg).await {
+                    tracing::error!(error = %e, "Job tick failed");
                 }
             })
         })?)
         .await?;
 
     scheduler.start().await?;
-    info!("Scheduled ({}). Ctrl-C to exit.", cron);
+    info!("Scheduled ({cron}). Ctrl-C to exit.");
     tokio::signal::ctrl_c().await?;
     scheduler.shutdown().await?;
+    Ok(())
+}
+
+async fn run_one_tick(
+    cfg: &Arc<PipelineConfig>,
+    ctx: &Arc<JobContext>,
+    reg: &Arc<TypeRegistry>,
+) -> Result<()> {
+    // Pre-job: spawn consumers if configured
+    for step in &cfg.pre_job.steps {
+        match step {
+            PreStepConfig::SpawnConsumer {
+                queue, commit_mode, ..
+            } => {
+                let _mode = match commit_mode {
+                    CommitModeStr::PerBatch => CommitMode::PerBatch,
+                    CommitModeStr::DrainInPostJob => CommitMode::DrainInPostJob,
+                };
+                // Consumer task is model-typed — we need the model from the registry.
+                // For now log a warning; full typed consumer spawn requires
+                // the model factory to produce a consumer step.
+                tracing::warn!(queue = %queue, "spawn_consumer: use register_model for typed consumer");
+            }
+        }
+    }
+
+    // Main job
+    let retry_steps = build_steps(&cfg.main_job.retry_steps, reg)?;
+    let post_window = build_steps(&cfg.main_job.post_window_steps, reg)?;
+    let post_loop = build_steps(&cfg.main_job.post_loop_steps, reg)?;
+    let window_cfg = build_window_cfg(cfg)?;
+
+    let mut runner = MainJobRunner {
+        window_cfg,
+        retry_steps,
+        post_window_steps: post_window,
+        post_loop_steps: post_loop,
+    };
+
+    let _summary = runner.run(ctx).await?;
+
+    // Post-job
+    run_post_job(&cfg.post_job, ctx, reg).await?;
+
     Ok(())
 }
