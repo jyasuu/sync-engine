@@ -221,6 +221,7 @@ pub enum CommitModeStr {
 pub struct MainJobConfig {
     pub iterator: IteratorConfig,
     pub retry: RetryConfig,
+    #[serde(default)]
     pub retry_steps: Vec<MainStepConfig>,
     #[serde(default)]
     pub post_window_steps: Vec<MainStepConfig>,
@@ -284,6 +285,7 @@ pub struct MainStepConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct PostJobConfig {
+    #[serde(default)]
     pub steps: Vec<PostStepConfig>,
 }
 
@@ -356,6 +358,14 @@ pub fn validate(cfg: &PipelineConfig, registry: &TypeRegistry) -> Result<()> {
             ));
         }
     };
+
+    // Validate iterator type
+    let iter_type = cfg.main_job.iterator.iter_type.as_str();
+    if iter_type != "date_window" {
+        errors.push(format!(
+            "[main_job.iterator] type \"{iter_type}\" is not supported — only \"date_window\" is currently valid"
+        ));
+    }
 
     // Validate all step lists
     let all_steps = cfg

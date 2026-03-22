@@ -180,7 +180,15 @@ fn build_upsert_sql(hint: &SinkHint, fields: &[FieldDef]) -> UpsertSql {
         .iter()
         .map(|s| {
             let parts: Vec<&str> = s.split('=').map(str::trim).collect();
-            let idx = col_list.iter().position(|c| *c == parts[1]).unwrap();
+            let source_field = parts.get(1).unwrap_or_else(|| {
+                panic!("schema.toml: extra_copy entry \"{s}\" must be \"dest_col = source_col\"")
+            });
+            let idx = col_list.iter().position(|c| *c == *source_field)
+                .unwrap_or_else(|| panic!(
+                    "schema.toml: extra_copy source field \"{source_field}\" not found in record fields. \
+                     Available fields: [{}]",
+                    col_list.join(", ")
+                ));
             format!("{} = ${}", parts[0], idx + 1)
         })
         .collect();

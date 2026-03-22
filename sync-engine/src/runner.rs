@@ -53,7 +53,10 @@ impl MainJobRunner {
                 break;
             }
 
-            // Sleep between windows (skip before first window, skip on error)
+            // Sleep between windows (skip before first, skip after an error window)
+            // The built-in sleep runs here so it cannot be skipped by a failing step.
+            // If sleep_secs = 0 AND the user has a SleepStep in post_window_steps,
+            // only the step-level sleep runs — avoiding double-sleep.
             if !first && last_ok && self.window_cfg.sleep_secs > 0 {
                 info!(
                     secs = self.window_cfg.sleep_secs,

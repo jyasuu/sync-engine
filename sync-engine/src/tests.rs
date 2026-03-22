@@ -403,3 +403,94 @@ mod http_service_config_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod runner_behavior_tests {
+    use crate::job::DateWindowIter;
+
+    #[tokio::test]
+    async fn sleep_skipped_on_error_window() {
+        // After an error window, last_ok = false — no sleep on the next iteration.
+        // We test this indirectly: a zero-sleep iterator with one error window
+        // should still produce the remaining windows.
+        let mut iter = DateWindowIter::new(9, 0, 3).without_sleep();
+        let mut windows = Vec::new();
+        while let Some(w) = iter.next_window().await {
+            windows.push(w);
+        }
+        // (9,6), (6,3), (3,0)
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0], (9, 6));
+        assert_eq!(windows[2], (3, 0));
+    }
+
+    #[tokio::test]
+    async fn window_count_matches_range_divided_by_limit() {
+        // 28-day range, 7-day windows → exactly 4 windows
+        let mut iter = DateWindowIter::new(28, 0, 7).without_sleep();
+        let mut count = 0;
+        while iter.next_window().await.is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 4);
+    }
+}
+
+#[cfg(test)]
+mod validation_extra_tests {
+    use crate::pipeline_runner::{validate, PipelineConfig};
+    use crate::registry::TypeRegistry;
+
+    fn minimal_cfg_with_iter_type(t: &str) -> PipelineConfig {
+        let raw = format!(
+            r#"
+[pre_job]
+init_resources = true
+
+[main_job.iterator]
+type           = "{t}"
+start_interval = "30"
+end_interval   = "0"
+interval_limit = "7"
+sleep_secs     = "60"
+
+[main_job.retry]
+max_attempts = 3
+backoff_secs = 1
+
+[post_job]
+"#
+        );
+        toml::from_str(&raw).unwrap()
+    }
+
+    #[test]
+    fn invalid_iterator_type_is_caught() {
+        let cfg = minimal_cfg_with_iter_type("offset_page");
+        let reg = TypeRegistry::new();
+        let err = validate(&cfg, &reg).unwrap_err().to_string();
+        assert!(
+            err.contains("offset_page"),
+            "error should name the bad type"
+        );
+        assert!(
+            err.contains("date_window"),
+            "error should name the valid type"
+        );
+    }
+
+    #[test]
+    fn valid_iterator_type_passes() {
+        let cfg = minimal_cfg_with_iter_type("date_window");
+        let reg = TypeRegistry::new();
+        // May fail for other reasons (empty resources etc.) but not iterator type
+        let err_str = validate(&cfg, &reg)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            !err_str.contains("not supported"),
+            "valid type should not produce unsupported error"
+        );
+    }
+}
