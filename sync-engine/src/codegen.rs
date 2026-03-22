@@ -428,7 +428,7 @@ pub fn generate_pipeline_skeleton(schema_path: impl AsRef<Path>, out_path: impl 
     doc.push_str("[resources.pg]\ntype            = \"postgres\"\nurl             = { env = \"SINK__DATABASE_URL\" }\nmax_connections = 5\n\n");
     doc.push_str("[resources.auth]\ntype          = \"oauth2\"\ntoken_url     = { env = \"AUTH__TOKEN_URL\" }\nclient_id     = { env = \"AUTH__CLIENT_ID\" }\nclient_secret = { env = \"AUTH__CLIENT_SECRET\" }\n\n");
     doc.push_str("[resources.http]\ntype           = \"http_client\"\ntimeout_secs   = 620\nkeepalive_secs = 30\n\n");
-    doc.push_str("[resources.svc]\ntype       = \"http_service\"\nhttp       = \"http\"\nauth       = \"auth\"\nendpoint   = { env = \"SOURCE__ENDPOINT\" }\nrealm_type = { env = \"SOURCE__REALM_TYPE\", default = \"\" }\n\n");
+    doc.push_str("[resources.svc]\ntype         = \"http_service\"\nhttp         = \"http\"\nauth         = \"auth\"\nendpoint     = { env = \"SOURCE__ENDPOINT\" }\nrealm_type   = { env = \"SOURCE__REALM_TYPE\", default = \"\" }\n# start_param = \"start_time\"   # default — override for APIs using different param names\n# end_param   = \"end_time\"     # default\n# date_format = \"%Y%m%d\"       # default — e.g. \"%Y-%m-%d\" or \"%Y-%m-%dT00:00:00Z\"\n# [[resources.svc.extra_params]]\n# key   = \"api_version\"\n# value = { env = \"SOURCE__API_VERSION\", default = \"v2\" }\n\n");
 
     doc.push_str("# ── Slots ─────────────────────────────────────────────────────────────────\n");
     doc.push_str(

@@ -38,11 +38,14 @@ timeout_secs   = 620
 keepalive_secs = 30
 
 [resources.svc]
-type       = "http_service"
-http       = "http"
-auth       = "auth"
-endpoint   = { env = "SOURCE__USER_ENDPOINT" }
-realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
+type         = "http_service"
+http         = "http"
+auth         = "auth"
+endpoint     = { env = "SOURCE__USER_ENDPOINT" }
+realm_type   = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
+# start_param = "start_time"   # default — override for APIs using different names
+# end_param   = "end_time"     # default
+# date_format = "%Y%m%d"       # default — e.g. "%Y-%m-%d" or "%s" for unix timestamp
 
 [slots.api_rows]
 type  = "ApiUser"

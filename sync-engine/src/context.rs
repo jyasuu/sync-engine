@@ -54,6 +54,12 @@ pub struct Connections {
     pub http: reqwest::Client,
     pub endpoint: String,
     pub extra_query: Vec<(String, String)>,
+    /// Query param name for window start (default: "start_time")
+    pub start_param: String,
+    /// Query param name for window end (default: "end_time")
+    pub end_param: String,
+    /// strftime format string for date params (default: "%Y%m%d")
+    pub date_format: String,
 }
 
 // ── WindowMeta ────────────────────────────────────────────────────────────

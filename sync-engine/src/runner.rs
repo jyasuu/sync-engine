@@ -65,13 +65,14 @@ impl MainJobRunner {
 
             let window_end = (cursor - limit).max(end);
 
-            // Compute formatted date strings
+            // Compute formatted date strings using the configured format
+            let fmt = &ctx.connections.date_format;
             let now = Utc::now();
             let start_str = (now - chrono::Duration::days(cursor))
-                .format("%Y%m%d")
+                .format(fmt)
                 .to_string();
             let end_str = (now - chrono::Duration::days(window_end))
-                .format("%Y%m%d")
+                .format(fmt)
                 .to_string();
 
             info!(start = %start_str, end = %end_str, "Processing window");

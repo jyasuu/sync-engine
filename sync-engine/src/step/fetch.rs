@@ -60,6 +60,8 @@ where
         drop(window);
 
         let endpoint = ctx.connections.endpoint.clone();
+        let start_param = ctx.connections.start_param.as_str();
+        let end_param = ctx.connections.end_param.as_str();
         let token = ctx.connections.auth.get_token().await?;
 
         debug!(endpoint = %endpoint, start = %start_str, end = %end_str, "HTTP fetch");
@@ -69,7 +71,7 @@ where
             .http
             .get(&endpoint)
             .bearer_auth(&token)
-            .query(&[("start_time", &start_str), ("end_time", &end_str)])
+            .query(&[(start_param, &start_str), (end_param, &end_str)])
             .timeout(Duration::from_secs(600));
 
         for (k, v) in &ctx.connections.extra_query {

@@ -95,7 +95,35 @@ pub enum ResourceDef {
         endpoint: ConfigValue,
         #[serde(default)]
         realm_type: Option<ConfigValue>,
+        /// Query param name for the window start date (default: "start_time")
+        #[serde(default = "default_start_param")]
+        start_param: String,
+        /// Query param name for the window end date (default: "end_time")
+        #[serde(default = "default_end_param")]
+        end_param: String,
+        /// strftime format for date params (default: "%Y%m%d")
+        #[serde(default = "default_date_fmt")]
+        date_format: String,
+        /// Additional static query params as key=value pairs
+        #[serde(default)]
+        extra_params: Vec<ExtraParam>,
     },
+}
+
+fn default_start_param() -> String {
+    "start_time".into()
+}
+fn default_end_param() -> String {
+    "end_time".into()
+}
+fn default_date_fmt() -> String {
+    "%Y%m%d".into()
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ExtraParam {
+    pub key: String,
+    pub value: ConfigValue,
 }
 
 fn default_max_conn() -> u32 {
@@ -510,19 +538,36 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
         }
     }
 
-    // Pass 4: http_service (endpoint + realm_type)
+    // Pass 4: http_service — endpoint, date params, extra static query params
+    let mut start_param = "start_time".to_owned();
+    let mut end_param = "end_time".to_owned();
+    let mut date_format = "%Y%m%d".to_owned();
+
     for (_name, def) in &cfg.resources {
         if let ResourceDef::HttpService {
             endpoint: ep,
             realm_type,
+            start_param: sp,
+            end_param: ep2,
+            date_format: df,
+            extra_params,
             ..
         } = def
         {
             endpoint = ep.resolve()?;
+            start_param = sp.clone();
+            end_param = ep2.clone();
+            date_format = df.clone();
             if let Some(rt) = realm_type {
                 let v = rt.resolve().unwrap_or_default();
                 if !v.is_empty() {
                     extra_query.push(("realm_type".to_owned(), v));
+                }
+            }
+            for p in extra_params {
+                let v = p.value.resolve().unwrap_or_default();
+                if !v.is_empty() {
+                    extra_query.push((p.key.clone(), v));
                 }
             }
         }
@@ -547,6 +592,9 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
         http,
         endpoint,
         extra_query,
+        start_param,
+        end_param,
+        date_format,
     };
 
     // ── Config map ────────────────────────────────────────────────────────

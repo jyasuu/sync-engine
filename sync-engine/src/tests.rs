@@ -321,3 +321,85 @@ mod retry_tests {
         assert_eq!(count.load(Ordering::SeqCst), 3);
     }
 }
+
+#[cfg(test)]
+mod http_service_config_tests {
+    use crate::pipeline_runner::ResourceDef;
+
+    #[test]
+    fn default_param_names_are_start_end_time() {
+        let toml = r#"
+            type     = "http_service"
+            http     = "http"
+            auth     = "auth"
+            endpoint = "https://api.example.com"
+        "#;
+        let def: ResourceDef = toml::from_str(toml).unwrap();
+        if let ResourceDef::HttpService {
+            start_param,
+            end_param,
+            date_format,
+            ..
+        } = def
+        {
+            assert_eq!(start_param, "start_time");
+            assert_eq!(end_param, "end_time");
+            assert_eq!(date_format, "%Y%m%d");
+        } else {
+            panic!("expected HttpService variant");
+        }
+    }
+
+    #[test]
+    fn custom_param_names_round_trip() {
+        let toml = r#"
+            type        = "http_service"
+            http        = "http"
+            auth        = "auth"
+            endpoint    = "https://api.example.com"
+            start_param = "from_date"
+            end_param   = "to_date"
+            date_format = "%Y-%m-%d"
+        "#;
+        let def: ResourceDef = toml::from_str(toml).unwrap();
+        if let ResourceDef::HttpService {
+            start_param,
+            end_param,
+            date_format,
+            ..
+        } = def
+        {
+            assert_eq!(start_param, "from_date");
+            assert_eq!(end_param, "to_date");
+            assert_eq!(date_format, "%Y-%m-%d");
+        } else {
+            panic!("expected HttpService variant");
+        }
+    }
+
+    #[test]
+    fn extra_params_parsed() {
+        let toml = r#"
+            type     = "http_service"
+            http     = "http"
+            auth     = "auth"
+            endpoint = "https://api.example.com"
+
+            [[extra_params]]
+            key   = "api_version"
+            value = "v2"
+
+            [[extra_params]]
+            key   = "tenant"
+            value = { env = "TENANT_ID", default = "default" }
+        "#;
+        let def: ResourceDef = toml::from_str(toml).unwrap();
+        if let ResourceDef::HttpService { extra_params, .. } = def {
+            assert_eq!(extra_params.len(), 2);
+            assert_eq!(extra_params[0].key, "api_version");
+            assert_eq!(extra_params[1].key, "tenant");
+        } else {
+            panic!("expected HttpService variant");
+        }
+    }
+}
