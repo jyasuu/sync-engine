@@ -54,6 +54,10 @@ pub struct PipelineConfig {
     pub slots:     HashMap<String, SlotDef>,
     #[serde(default)]
     pub queues:    HashMap<String, QueueDef>,
+    /// Runs once at startup after build_context, before the trigger loop.
+    /// Pipeline-scoped slots written here survive into every tick.
+    #[serde(default)]
+    pub init_job:  Option<InitJobConfig>,
     pub pre_job:   PreJobConfig,
     pub main_job:  MainJobConfig,
     pub post_job:  PostJobConfig,
@@ -363,42 +367,114 @@ pub struct MainStepConfig {
     /// For type="send_to_queue"
     pub queue:     Option<String>,
 
-    // ── Postgres commit strategy ──────────────────────────────────────────
+    // ── Commit / ack strategies ───────────────────────────────────────────
     /// Controls how Postgres writes are committed.
     /// Valid values: "tx_scope" (default), "autocommit", "bulk_tx"
-    /// - tx_scope   — one transaction per window  (type="tx_upsert", default)
-    /// - autocommit — each row committed independently via pool
-    /// - bulk_tx    — accumulate then commit in post_loop_steps (Case 2 pattern)
     #[serde(default)]
     pub commit_strategy: Option<String>,
 
-    // ── RabbitMQ ack strategy ─────────────────────────────────────────────
     /// Controls when RabbitMQ messages are acknowledged.
-    /// Valid values: "ack_on_commit" (default), "ack_on_receive"
-    /// - ack_on_commit  — ack after the Postgres tx commits (safe, at-least-once)
-    /// - ack_on_receive — ack immediately on receive (fast, at-most-once)
+    /// Valid values: "ack_on_commit" (default), "ack_on_receive", "ack_per_batch"
     #[serde(default)]
     pub ack_strategy: Option<String>,
 
     // ── Elasticsearch fields ──────────────────────────────────────────────
-    /// ES index name. Used by type="es_index" and type="es_fetch".
-    pub index:     Option<String>,
-    /// ES operation for type="es_index": "upsert" (default), "delete", "create"
-    pub op:        Option<String>,
-    /// ES scroll TTL for type="es_fetch" (default: "1m")
+    pub index:      Option<String>,
+    pub op:         Option<String>,
     pub scroll_ttl: Option<String>,
-    /// ES batch size for type="es_fetch" (default: 500)
     pub batch_size: Option<i64>,
 
     // ── Kafka fields ──────────────────────────────────────────────────────
-    /// Kafka topic. Used by type="kafka_produce" and type="kafka_consume".
     pub topic:        Option<ConfigValue>,
-    /// Field name to use as Kafka message key (kafka_produce).
     pub key_field:    Option<String>,
-    /// Max messages to consume per step execution (kafka_consume, default: 500).
     pub max_messages: Option<usize>,
-    /// Timeout (ms) waiting for Kafka messages (kafka_consume, default: 5000).
     pub timeout_ms:   Option<u64>,
+
+    // ── Complex transform fields ──────────────────────────────────────────
+
+    /// For type="split_transform": list of (transform name, writes slot) pairs.
+    /// Each entry applies a registered transform to the same `reads` slot and
+    /// writes results into a different output slot.
+    ///
+    /// ```toml
+    /// [[main_job.retry_steps]]
+    /// type   = "split_transform"
+    /// reads  = "api_rows"
+    /// transforms = [
+    ///   { transform = "UserTransform",     writes = "db_users" },
+    ///   { transform = "UserRoleTransform", writes = "db_roles" },
+    /// ]
+    /// ```
+    #[serde(default)]
+    pub transforms: Vec<SplitTransformEntry>,
+
+    /// For type="merge_slots": list of slot names to concatenate.
+    /// All slots must hold the same Rust type. Writes the merged Vec to `writes`.
+    ///
+    /// ```toml
+    /// [[main_job.retry_steps]]
+    /// type        = "merge_slots"
+    /// merge_reads = ["slot_a", "slot_b"]
+    /// writes      = "merged"
+    /// ```
+    #[serde(default)]
+    pub merge_reads: Vec<String>,
+}
+
+/// One entry inside `split_transform.transforms`.
+#[derive(Debug, Deserialize, Clone)]
+pub struct SplitTransformEntry {
+    /// Name of the registered transform (e.g. "UserTransform").
+    pub transform: String,
+    /// Slot to write the output into.
+    pub writes: String,
+    /// Whether to append to the target slot rather than replace it.
+    #[serde(default)]
+    pub append: bool,
+}
+
+// ── [init_job] ────────────────────────────────────────────────────────────
+//
+// Runs ONCE after build_context and validate, before the trigger loop starts.
+// Use for migrations, connectivity checks, cache warm-up, and pre-seeding
+// pipeline-scoped slots that should survive across all ticks.
+//
+// Steps declared here share the same variants as post_job: raw_sql, custom,
+// log_summary, drain_queue. Add [init_job] to pipeline.toml:
+//
+//   [[init_job.steps]]
+//   type = "raw_sql"
+//   sql  = { env = "INIT__MIGRATION_SQL", default = "" }
+//   skip_if_empty = true
+//
+//   [[init_job.steps]]
+//   type = "custom"
+//   hook = "WarmCache"    # registered in main.rs
+
+#[derive(Debug, Deserialize, Default)]
+pub struct InitJobConfig {
+    #[serde(default)]
+    pub steps: Vec<InitStepConfig>,
+}
+
+/// Step variants available in [init_job].
+/// Same capabilities as post_job — raw SQL, custom hooks, and logging.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InitStepConfig {
+    /// Execute a SQL statement directly (e.g. migrations, TRUNCATE, REFRESH).
+    RawSql {
+        sql:           ConfigValue,
+        #[serde(default)]
+        skip_if_empty: bool,
+    },
+    /// A custom async function registered in main.rs via register_post_hook.
+    Custom {
+        hook: String,
+    },
+    /// Emit a tracing log line summarising the context state. Useful for
+    /// confirming connectivity at startup.
+    LogSummary,
 }
 
 // ── [post_job] ────────────────────────────────────────────────────────────
@@ -566,6 +642,47 @@ pub fn validate(cfg: &PipelineConfig, registry: &TypeRegistry) -> Result<()> {
                 }
             }
             "sleep" | "raw_sql" => {} // no type-level validation needed
+            "split_transform" => {
+                if step.transforms.is_empty() {
+                    errors.push(format!("{ctx}: missing `transforms` array"));
+                }
+                for entry in &step.transforms {
+                    if !registry.has_transform(&entry.transform) {
+                        errors.push(format!(
+                            "{ctx}: transform \"{}\" not registered",
+                            entry.transform
+                        ));
+                    }
+                    check_slot(&entry.writes, &ctx, &mut errors);
+                }
+                if let Some(ref r) = step.reads { check_slot(r, &ctx, &mut errors); }
+            }
+            "merge_slots" => {
+                if step.merge_reads.is_empty() {
+                    errors.push(format!("{ctx}: missing `merge_reads` array"));
+                }
+                if step.writes.is_none() {
+                    errors.push(format!("{ctx}: missing `writes` field"));
+                }
+                if step.model.is_none() {
+                    errors.push(format!("{ctx}: missing `model` field"));
+                }
+                for r in &step.merge_reads { check_slot(r, &ctx, &mut errors); }
+                if let Some(w) = &step.writes { check_slot(w, &ctx, &mut errors); }
+            }
+            "slot_to_json" | "json_to_slot" => {
+                if step.reads.is_none() {
+                    errors.push(format!("{ctx}: missing `reads` field"));
+                }
+                if step.writes.is_none() {
+                    errors.push(format!("{ctx}: missing `writes` field"));
+                }
+                if step.model.is_none() {
+                    errors.push(format!("{ctx}: missing `model` field"));
+                }
+                if let Some(r) = &step.reads  { check_slot(r, &ctx, &mut errors); }
+                if let Some(w) = &step.writes { check_slot(w, &ctx, &mut errors); }
+            }
             "es_index" => {
                 #[cfg(not(feature = "elasticsearch"))]
                 errors.push(format!("{ctx}: requires feature \"elasticsearch\""));
@@ -618,7 +735,8 @@ pub fn validate(cfg: &PipelineConfig, registry: &TypeRegistry) -> Result<()> {
             other => errors.push(format!(
                 "Unknown step type \"{other}\" — valid types: \
                  fetch, transform, tx_upsert, send_to_queue, sleep, raw_sql, \
-                 es_index, es_fetch, kafka_produce, kafka_consume"
+                 es_index, es_fetch, kafka_produce, kafka_consume, \
+                 split_transform, merge_slots, slot_to_json, json_to_slot"
             )),
         }
 
@@ -936,7 +1054,7 @@ pub fn build_window_cfg(cfg: &PipelineConfig) -> Result<WindowConfig> {
 /// Build typed steps from a slice of MainStepConfig using the TypeRegistry.
 pub fn build_steps(
     steps: &[MainStepConfig],
-    registry: &TypeRegistry,
+    registry: &Arc<TypeRegistry>,
 ) -> Result<StepRunner> {
     let mut runner = StepRunner::new();
     for s in steps {
@@ -1045,6 +1163,47 @@ pub fn build_steps(
                 #[cfg(not(feature = "kafka"))]
                 return Err(anyhow!("kafka_consume requires feature \"kafka\" — add it to Cargo.toml"));
             }
+            "split_transform" => {
+                if s.transforms.is_empty() {
+                    return Err(anyhow!("split_transform step missing `transforms` array"));
+                }
+                let reads = s.reads.clone().unwrap_or_else(|| "api_rows".into());
+                let entries = s.transforms.iter()
+                    .map(|e| (e.transform.clone(), e.writes.clone(), e.append))
+                    .collect();
+                use crate::step::multi_transform::SplitTransformStep;
+                runner.push(SplitTransformStep::new(reads, entries, Arc::clone(registry)));
+            }
+            "merge_slots" => {
+                if s.merge_reads.is_empty() {
+                    return Err(anyhow!("merge_slots step missing `merge_reads` array"));
+                }
+                let writes = s.writes.clone()
+                    .ok_or_else(|| anyhow!("merge_slots step missing `writes` field"))?;
+                let model = s.model.as_deref()
+                    .ok_or_else(|| anyhow!("merge_slots step missing `model` field"))?;
+                runner.push_boxed(registry.build_merge_slots(
+                    model, s.merge_reads.clone(), &writes, s.append,
+                )?);
+            }
+            "slot_to_json" => {
+                let reads = s.reads.clone()
+                    .ok_or_else(|| anyhow!("slot_to_json step missing `reads` field"))?;
+                let writes = s.writes.clone()
+                    .ok_or_else(|| anyhow!("slot_to_json step missing `writes` field"))?;
+                let model = s.model.as_deref()
+                    .ok_or_else(|| anyhow!("slot_to_json step missing `model` field"))?;
+                runner.push_boxed(registry.build_slot_to_json(model, &reads, &writes, s.append)?);
+            }
+            "json_to_slot" => {
+                let reads = s.reads.clone()
+                    .ok_or_else(|| anyhow!("json_to_slot step missing `reads` field"))?;
+                let writes = s.writes.clone()
+                    .ok_or_else(|| anyhow!("json_to_slot step missing `writes` field"))?;
+                let model = s.model.as_deref()
+                    .ok_or_else(|| anyhow!("json_to_slot step missing `model` field"))?;
+                runner.push_boxed(registry.build_json_to_slot(model, &reads, &writes, s.append)?);
+            }
             "send_to_queue" => {
                 let model = s.model.as_deref()
                     .ok_or_else(|| anyhow!("send_to_queue step missing `model` field"))?;
@@ -1079,6 +1238,35 @@ pub fn build_steps(
 }
 
 
+
+// ── InitJobExecutor ───────────────────────────────────────────────────────
+
+/// Runs once at startup — after build_context and validate, before the trigger.
+pub async fn run_init_job(
+    cfg:      &InitJobConfig,
+    ctx:      &Arc<JobContext>,
+    registry: &TypeRegistry,
+) -> Result<()> {
+    for step in &cfg.steps {
+        match step {
+            InitStepConfig::RawSql { sql, skip_if_empty } => {
+                let s = sql.resolve().unwrap_or_default();
+                RawSqlStep::new(s, *skip_if_empty).run(ctx).await?;
+            }
+            InitStepConfig::Custom { hook } => {
+                if let Some(f) = registry.get_post_hook(hook) {
+                    f(Arc::clone(ctx)).await?;
+                } else {
+                    tracing::warn!(hook = %hook, "init_job: custom hook not registered — skipping");
+                }
+            }
+            InitStepConfig::LogSummary => {
+                LogSummaryStep.run(ctx).await?;
+            }
+        }
+    }
+    Ok(())
+}
 
 // ── PostJobExecutor ───────────────────────────────────────────────────────
 
@@ -1135,6 +1323,14 @@ pub async fn run(path: &str, registry: TypeRegistry) -> Result<()> {
 
     validate(&cfg, &reg)?;
     let ctx = build_context(&cfg).await?;
+
+    // Run init_job once before the trigger loop starts.
+    if let Some(ref init) = cfg.init_job {
+        info!("Running init_job ({} steps)", init.steps.len());
+        run_init_job(init, &ctx, &reg).await
+            .context("init_job failed")?;
+        info!("init_job complete");
+    }
 
     // Resolve trigger: prefer [job.trigger], fall back to legacy [job.scheduler].
     let trigger = resolve_trigger(&cfg)?;

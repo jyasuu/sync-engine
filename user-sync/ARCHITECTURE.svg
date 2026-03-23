@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1224" viewBox="0 0 900 1224" font-family="ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace" font-size="13">
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1284" viewBox="0 0 900 1284" font-family="ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace" font-size="13">
 <style>
 .bg   { fill:#f8f8f6; }
 .box  { fill:#fff; stroke:#d4d2c8; stroke-width:1; }
@@ -28,132 +28,146 @@
 <path d="M2 1L8 5L2 9" fill="none" stroke="#378add" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
 </marker>
 </defs>
-<rect width="900" height="1224" class="bg" rx="0"/>
+<rect width="900" height="1284" class="bg" rx="0"/>
 <text x="40" y="44" class="title">user-sync  —  pipeline architecture</text>
 <text x="40" y="62" class="sub">pattern: case 1 — tx per window  ·  trigger: cron "0 */30 * * * *"  ·  mutex-skip  ·  sink: global_users</text>
-<rect x="20" y="80" width="860" height="504" rx="10" class="box"/>
-<text x="40" y="98" class="dim">schema.toml</text>
-<rect x="40" y="110" width="246" height="448" rx="6" class="box"/>
-<rect x="40" y="110" width="246" height="36" rx="6" class="hdr"/>
-<rect x="40" y="134" width="246" height="12" class="hdr"/>
-<text x="52" y="130" class="ht">ApiUserResponse</text>
-<text x="52" y="144" class="dim">source: ApiUser</text>
-<text x="56" y="178" class="lbl">pccuid</text>
-<text x="56" y="214" class="lbl">sso_acct</text>
-<text x="56" y="250" class="lbl">fact_no</text>
-<text x="56" y="286" class="lbl">local_fact_no?</text>
-<text x="56" y="322" class="lbl">chinese_nm?</text>
-<text x="56" y="358" class="lbl">local_pnl_nm?</text>
-<text x="56" y="394" class="lbl">english_nm?</text>
-<text x="56" y="430" class="lbl">contact_mail?</text>
-<text x="56" y="466" class="lbl">sex?</text>
-<text x="56" y="502" class="lbl">lo_posi_nm?</text>
-<text x="56" y="538" class="lbl">… +7</text>
-<rect x="326" y="110" width="246" height="340" rx="6" class="box"/>
-<rect x="326" y="110" width="246" height="36" rx="6" class="hdr4"/>
-<rect x="326" y="134" width="246" height="12" class="hdr4"/>
-<text x="338" y="130" class="ht4">UserTransform</text>
-<text x="338" y="144" class="dim">ApiUser → DbUser</text>
-<text x="342" y="178" class="lbl">pccuid  →  copy</text>
-<text x="342" y="214" class="lbl">sso_acct  →  copy</text>
-<text x="342" y="250" class="lbl">fact_no  →  copy</text>
-<text x="342" y="286" class="lbl">local_fact_no  →  null_to_empty</text>
-<text x="342" y="322" class="lbl">chinese_nm  →  null_to_empty</text>
-<text x="342" y="358" class="lbl">local_pnl_nm  →  null_to_empty</text>
-<text x="342" y="394" class="lbl">english_nm  →  null_to_empty</text>
-<text x="342" y="430" class="lbl">contact_mail  →  null_to_empty</text>
-<rect x="612" y="110" width="246" height="448" rx="6" class="box"/>
-<rect x="612" y="110" width="246" height="36" rx="6" class="hdr2"/>
-<rect x="612" y="134" width="246" height="12" class="hdr2"/>
-<text x="624" y="130" class="ht2">DbUser</text>
-<text x="624" y="144" class="dim">sink: global_users</text>
-<text x="628" y="178" class="lbl">pccuid</text>
-<text x="628" y="214" class="lbl">sso_acct</text>
-<text x="628" y="250" class="lbl">fact_no</text>
-<text x="628" y="286" class="lbl">local_fact_no</text>
-<text x="628" y="322" class="lbl">chinese_nm</text>
-<text x="628" y="358" class="lbl">local_pnl_nm</text>
-<text x="628" y="394" class="lbl">english_nm</text>
-<text x="628" y="430" class="lbl">contact_mail</text>
-<text x="628" y="466" class="lbl">sex</text>
-<text x="628" y="502" class="lbl">lo_posi_nm</text>
-<text x="628" y="538" class="lbl">… +7</text>
-<line x1="286" y1="128" x2="324" y2="128" class="arr2"/>
-<line x1="572" y1="128" x2="610" y2="128" class="arr2"/>
-<rect x="20" y="614" width="860" height="280" rx="10" class="box"/>
-<text x="40" y="632" class="dim">pipeline.toml  ·  main_job</text>
-<rect x="40" y="648" width="151" height="56" rx="6" class="box"/>
-<rect x="40" y="648" width="151" height="28" rx="6" class="hdr"/>
-<rect x="40" y="662" width="151" height="14" class="hdr"/>
-<text x="115" y="666" class="ht" text-anchor="middle">pre_job</text>
-<text x="115" y="692" class="dim" text-anchor="middle">resources</text>
-<line x1="191" y1="676" x2="205" y2="676" class="arr2"/>
-<rect x="207" y="648" width="151" height="56" rx="6" class="box"/>
-<rect x="207" y="648" width="151" height="28" rx="6" class="hdr"/>
-<rect x="207" y="662" width="151" height="14" class="hdr"/>
-<text x="282" y="666" class="ht" text-anchor="middle">fetch</text>
-<text x="282" y="692" class="dim" text-anchor="middle">→ ApiUser</text>
-<line x1="358" y1="676" x2="372" y2="676" class="arr2"/>
-<rect x="374" y="648" width="151" height="56" rx="6" class="box"/>
-<rect x="374" y="648" width="151" height="28" rx="6" class="hdr4"/>
-<rect x="374" y="662" width="151" height="14" class="hdr4"/>
-<text x="449" y="666" class="ht4" text-anchor="middle">transform</text>
-<text x="449" y="692" class="dim" text-anchor="middle">→ DbUser</text>
-<line x1="525" y1="676" x2="539" y2="676" class="arr2"/>
-<rect x="541" y="648" width="151" height="56" rx="6" class="box"/>
-<rect x="541" y="648" width="151" height="28" rx="6" class="hdr2"/>
-<rect x="541" y="662" width="151" height="14" class="hdr2"/>
-<text x="616" y="666" class="ht2" text-anchor="middle">tx_upsert</text>
-<text x="616" y="692" class="dim" text-anchor="middle">→ global_users</text>
-<line x1="692" y1="676" x2="706" y2="676" class="arr2"/>
-<rect x="708" y="648" width="151" height="56" rx="6" class="box"/>
-<rect x="708" y="648" width="151" height="28" rx="6" class="hdr3"/>
-<rect x="708" y="662" width="151" height="14" class="hdr3"/>
-<text x="783" y="666" class="ht3" text-anchor="middle">post_job</text>
-<text x="783" y="692" class="dim" text-anchor="middle">summary + hooks</text>
-<rect x="40" y="720" width="820" height="22" rx="4" class="dash"/>
-<text x="450" y="734" class="dim" text-anchor="middle">date_window iterator  ·  retry(max=5, backoff=2s)  ·  sleep between windows</text>
-<text x="40" y="756" class="dim">data flow:</text>
-<rect x="44" y="780" width="156" height="24" rx="4" fill="#378add" opacity="0.15" stroke="#378add" stroke-width="0.5"/>
-<text x="122" y="795" class="lbl" text-anchor="middle" fill="#378add">HTTP response</text>
-<line x1="200" y1="792" x2="208" y2="792" stroke="#378add" stroke-width="1" marker-end="url(#arr2)"/>
-<rect x="208" y="780" width="156" height="24" rx="4" fill="#7f77dd" opacity="0.15" stroke="#7f77dd" stroke-width="0.5"/>
-<text x="286" y="795" class="lbl" text-anchor="middle" fill="#7f77dd">api_rows slot</text>
-<line x1="364" y1="792" x2="372" y2="792" stroke="#7f77dd" stroke-width="1" marker-end="url(#arr2)"/>
-<rect x="372" y="780" width="156" height="24" rx="4" fill="#378add" opacity="0.15" stroke="#378add" stroke-width="0.5"/>
-<text x="450" y="795" class="lbl" text-anchor="middle" fill="#378add">DbUser</text>
-<line x1="528" y1="792" x2="536" y2="792" stroke="#378add" stroke-width="1" marker-end="url(#arr2)"/>
-<rect x="536" y="780" width="156" height="24" rx="4" fill="#7f77dd" opacity="0.15" stroke="#7f77dd" stroke-width="0.5"/>
-<text x="614" y="795" class="lbl" text-anchor="middle" fill="#7f77dd">db_rows slot</text>
-<line x1="692" y1="792" x2="700" y2="792" stroke="#7f77dd" stroke-width="1" marker-end="url(#arr2)"/>
-<rect x="700" y="780" width="156" height="24" rx="4" fill="#1d9e75" opacity="0.15" stroke="#1d9e75" stroke-width="0.5"/>
-<text x="778" y="795" class="lbl" text-anchor="middle" fill="#1d9e75">global_users</text>
-<rect x="20" y="918" width="860" height="160" rx="10" class="box"/>
-<text x="40" y="936" class="dim">post_job  +  scheduler</text>
-<rect x="40" y="946" width="193" height="50" rx="6" class="box"/>
-<rect x="40" y="946" width="193" height="26" rx="6" class="hdr3"/>
-<rect x="40" y="960" width="193" height="12" class="hdr3"/>
-<text x="136" y="963" class="ht3" text-anchor="middle">log_summary</text>
-<text x="136" y="988" class="dim" text-anchor="middle">fetched · upserted · skipped</text>
-<rect x="249" y="946" width="193" height="50" rx="6" class="box"/>
-<rect x="249" y="946" width="193" height="26" rx="6" class="hdr3"/>
-<rect x="249" y="960" width="193" height="12" class="hdr3"/>
-<text x="345" y="963" class="ht3" text-anchor="middle">raw_sql</text>
-<text x="345" y="988" class="dim" text-anchor="middle">post-sync SQL</text>
-<rect x="458" y="946" width="193" height="50" rx="6" class="box"/>
-<rect x="458" y="946" width="193" height="26" rx="6" class="hdr3"/>
-<rect x="458" y="960" width="193" height="12" class="hdr3"/>
-<text x="554" y="963" class="ht3" text-anchor="middle">—</text>
-<text x="554" y="988" class="dim" text-anchor="middle">await consumer</text>
-<rect x="667" y="946" width="193" height="50" rx="6" class="box"/>
-<rect x="667" y="946" width="193" height="26" rx="6" class="hdr3"/>
-<rect x="667" y="960" width="193" height="12" class="hdr3"/>
-<text x="763" y="963" class="ht3" text-anchor="middle">custom hook</text>
-<text x="763" y="988" class="dim" text-anchor="middle">registered in main.rs</text>
-<rect x="40" y="1010" width="820" height="44" rx="6" class="box"/>
-<rect x="40" y="1010" width="820" height="22" rx="6" class="hdr5"/>
-<rect x="40" y="1022" width="820" height="10" class="hdr5"/>
-<text x="450" y="1025" class="ht5" text-anchor="middle">trigger</text>
-<text x="450" y="1048" class="dim" text-anchor="middle">trigger: cron "0 */30 * * * *"  ·  mutex-skip  ·  pipeline slots survive ticks</text>
-<text x="450" y="1102" class="dim" text-anchor="middle">generated by sync_engine::codegen::generate_architecture_svg_file  ·  do not edit</text>
+<rect x="20" y="74" width="171" height="20" rx="0" class="hdr5"/>
+<text x="106" y="87" class="ht5" text-anchor="middle" font-size="11">startup</text>
+<text x="186" y="87" class="dim" font-size="10">→</text>
+<rect x="192" y="74" width="171" height="20" rx="0" class="hdr"/>
+<text x="278" y="87" class="ht" text-anchor="middle" font-size="11">trigger</text>
+<text x="358" y="87" class="dim" font-size="10">→</text>
+<rect x="364" y="74" width="171" height="20" rx="0" class="hdr2"/>
+<text x="450" y="87" class="ht2" text-anchor="middle" font-size="11">pre_job</text>
+<text x="530" y="87" class="dim" font-size="10">→</text>
+<rect x="536" y="74" width="171" height="20" rx="0" class="hdr2"/>
+<text x="622" y="87" class="ht2" text-anchor="middle" font-size="11">main_job</text>
+<text x="702" y="87" class="dim" font-size="10">→</text>
+<rect x="708" y="74" width="171" height="20" rx="0" class="hdr2"/>
+<text x="794" y="87" class="ht2" text-anchor="middle" font-size="11">post_job</text>
+<rect x="20" y="110" width="860" height="504" rx="10" class="box"/>
+<text x="40" y="128" class="dim">schema.toml</text>
+<rect x="40" y="140" width="246" height="448" rx="6" class="box"/>
+<rect x="40" y="140" width="246" height="36" rx="6" class="hdr"/>
+<rect x="40" y="164" width="246" height="12" class="hdr"/>
+<text x="52" y="160" class="ht">ApiUserResponse</text>
+<text x="52" y="174" class="dim">source: ApiUser</text>
+<text x="56" y="208" class="lbl">pccuid</text>
+<text x="56" y="244" class="lbl">sso_acct</text>
+<text x="56" y="280" class="lbl">fact_no</text>
+<text x="56" y="316" class="lbl">local_fact_no?</text>
+<text x="56" y="352" class="lbl">chinese_nm?</text>
+<text x="56" y="388" class="lbl">local_pnl_nm?</text>
+<text x="56" y="424" class="lbl">english_nm?</text>
+<text x="56" y="460" class="lbl">contact_mail?</text>
+<text x="56" y="496" class="lbl">sex?</text>
+<text x="56" y="532" class="lbl">lo_posi_nm?</text>
+<text x="56" y="568" class="lbl">… +7</text>
+<rect x="326" y="140" width="246" height="340" rx="6" class="box"/>
+<rect x="326" y="140" width="246" height="36" rx="6" class="hdr4"/>
+<rect x="326" y="164" width="246" height="12" class="hdr4"/>
+<text x="338" y="160" class="ht4">UserTransform</text>
+<text x="338" y="174" class="dim">ApiUser → DbUser</text>
+<text x="342" y="208" class="lbl">pccuid  →  copy</text>
+<text x="342" y="244" class="lbl">sso_acct  →  copy</text>
+<text x="342" y="280" class="lbl">fact_no  →  copy</text>
+<text x="342" y="316" class="lbl">local_fact_no  →  null_to_empty</text>
+<text x="342" y="352" class="lbl">chinese_nm  →  null_to_empty</text>
+<text x="342" y="388" class="lbl">local_pnl_nm  →  null_to_empty</text>
+<text x="342" y="424" class="lbl">english_nm  →  null_to_empty</text>
+<text x="342" y="460" class="lbl">contact_mail  →  null_to_empty</text>
+<rect x="612" y="140" width="246" height="448" rx="6" class="box"/>
+<rect x="612" y="140" width="246" height="36" rx="6" class="hdr2"/>
+<rect x="612" y="164" width="246" height="12" class="hdr2"/>
+<text x="624" y="160" class="ht2">DbUser</text>
+<text x="624" y="174" class="dim">sink: global_users</text>
+<text x="628" y="208" class="lbl">pccuid</text>
+<text x="628" y="244" class="lbl">sso_acct</text>
+<text x="628" y="280" class="lbl">fact_no</text>
+<text x="628" y="316" class="lbl">local_fact_no</text>
+<text x="628" y="352" class="lbl">chinese_nm</text>
+<text x="628" y="388" class="lbl">local_pnl_nm</text>
+<text x="628" y="424" class="lbl">english_nm</text>
+<text x="628" y="460" class="lbl">contact_mail</text>
+<text x="628" y="496" class="lbl">sex</text>
+<text x="628" y="532" class="lbl">lo_posi_nm</text>
+<text x="628" y="568" class="lbl">… +7</text>
+<line x1="286" y1="158" x2="324" y2="158" class="arr2"/>
+<line x1="572" y1="158" x2="610" y2="158" class="arr2"/>
+<rect x="20" y="644" width="860" height="280" rx="10" class="box"/>
+<text x="40" y="662" class="dim">pipeline.toml  ·  main_job</text>
+<rect x="40" y="678" width="151" height="56" rx="6" class="box"/>
+<rect x="40" y="678" width="151" height="28" rx="6" class="hdr"/>
+<rect x="40" y="692" width="151" height="14" class="hdr"/>
+<text x="115" y="696" class="ht" text-anchor="middle">pre_job</text>
+<text x="115" y="722" class="dim" text-anchor="middle">resources</text>
+<line x1="191" y1="706" x2="205" y2="706" class="arr2"/>
+<rect x="207" y="678" width="151" height="56" rx="6" class="box"/>
+<rect x="207" y="678" width="151" height="28" rx="6" class="hdr"/>
+<rect x="207" y="692" width="151" height="14" class="hdr"/>
+<text x="282" y="696" class="ht" text-anchor="middle">fetch</text>
+<text x="282" y="722" class="dim" text-anchor="middle">→ ApiUser</text>
+<line x1="358" y1="706" x2="372" y2="706" class="arr2"/>
+<rect x="374" y="678" width="151" height="56" rx="6" class="box"/>
+<rect x="374" y="678" width="151" height="28" rx="6" class="hdr4"/>
+<rect x="374" y="692" width="151" height="14" class="hdr4"/>
+<text x="449" y="696" class="ht4" text-anchor="middle">transform</text>
+<text x="449" y="722" class="dim" text-anchor="middle">→ DbUser</text>
+<line x1="525" y1="706" x2="539" y2="706" class="arr2"/>
+<rect x="541" y="678" width="151" height="56" rx="6" class="box"/>
+<rect x="541" y="678" width="151" height="28" rx="6" class="hdr2"/>
+<rect x="541" y="692" width="151" height="14" class="hdr2"/>
+<text x="616" y="696" class="ht2" text-anchor="middle">tx_upsert</text>
+<text x="616" y="722" class="dim" text-anchor="middle">→ global_users</text>
+<line x1="692" y1="706" x2="706" y2="706" class="arr2"/>
+<rect x="708" y="678" width="151" height="56" rx="6" class="box"/>
+<rect x="708" y="678" width="151" height="28" rx="6" class="hdr3"/>
+<rect x="708" y="692" width="151" height="14" class="hdr3"/>
+<text x="783" y="696" class="ht3" text-anchor="middle">post_job</text>
+<text x="783" y="722" class="dim" text-anchor="middle">summary + hooks</text>
+<rect x="40" y="750" width="820" height="22" rx="4" class="dash"/>
+<text x="450" y="764" class="dim" text-anchor="middle">date_window iterator  ·  retry(max=5, backoff=2s)  ·  sleep between windows</text>
+<text x="40" y="786" class="dim">data flow:</text>
+<rect x="44" y="810" width="156" height="24" rx="4" fill="#378add" opacity="0.15" stroke="#378add" stroke-width="0.5"/>
+<text x="122" y="825" class="lbl" text-anchor="middle" fill="#378add">HTTP response</text>
+<line x1="200" y1="822" x2="208" y2="822" stroke="#378add" stroke-width="1" marker-end="url(#arr2)"/>
+<rect x="208" y="810" width="156" height="24" rx="4" fill="#7f77dd" opacity="0.15" stroke="#7f77dd" stroke-width="0.5"/>
+<text x="286" y="825" class="lbl" text-anchor="middle" fill="#7f77dd">api_rows slot</text>
+<line x1="364" y1="822" x2="372" y2="822" stroke="#7f77dd" stroke-width="1" marker-end="url(#arr2)"/>
+<rect x="372" y="810" width="156" height="24" rx="4" fill="#378add" opacity="0.15" stroke="#378add" stroke-width="0.5"/>
+<text x="450" y="825" class="lbl" text-anchor="middle" fill="#378add">DbUser</text>
+<line x1="528" y1="822" x2="536" y2="822" stroke="#378add" stroke-width="1" marker-end="url(#arr2)"/>
+<rect x="536" y="810" width="156" height="24" rx="4" fill="#7f77dd" opacity="0.15" stroke="#7f77dd" stroke-width="0.5"/>
+<text x="614" y="825" class="lbl" text-anchor="middle" fill="#7f77dd">db_rows slot</text>
+<line x1="692" y1="822" x2="700" y2="822" stroke="#7f77dd" stroke-width="1" marker-end="url(#arr2)"/>
+<rect x="700" y="810" width="156" height="24" rx="4" fill="#1d9e75" opacity="0.15" stroke="#1d9e75" stroke-width="0.5"/>
+<text x="778" y="825" class="lbl" text-anchor="middle" fill="#1d9e75">global_users</text>
+<rect x="20" y="948" width="860" height="160" rx="10" class="box"/>
+<text x="40" y="966" class="dim">post_job  +  scheduler</text>
+<rect x="40" y="976" width="193" height="50" rx="6" class="box"/>
+<rect x="40" y="976" width="193" height="26" rx="6" class="hdr3"/>
+<rect x="40" y="990" width="193" height="12" class="hdr3"/>
+<text x="136" y="993" class="ht3" text-anchor="middle">log_summary</text>
+<text x="136" y="1018" class="dim" text-anchor="middle">fetched · upserted · skipped</text>
+<rect x="249" y="976" width="193" height="50" rx="6" class="box"/>
+<rect x="249" y="976" width="193" height="26" rx="6" class="hdr3"/>
+<rect x="249" y="990" width="193" height="12" class="hdr3"/>
+<text x="345" y="993" class="ht3" text-anchor="middle">raw_sql</text>
+<text x="345" y="1018" class="dim" text-anchor="middle">post-sync SQL</text>
+<rect x="458" y="976" width="193" height="50" rx="6" class="box"/>
+<rect x="458" y="976" width="193" height="26" rx="6" class="hdr3"/>
+<rect x="458" y="990" width="193" height="12" class="hdr3"/>
+<text x="554" y="993" class="ht3" text-anchor="middle">—</text>
+<text x="554" y="1018" class="dim" text-anchor="middle">await consumer</text>
+<rect x="667" y="976" width="193" height="50" rx="6" class="box"/>
+<rect x="667" y="976" width="193" height="26" rx="6" class="hdr3"/>
+<rect x="667" y="990" width="193" height="12" class="hdr3"/>
+<text x="763" y="993" class="ht3" text-anchor="middle">custom hook</text>
+<text x="763" y="1018" class="dim" text-anchor="middle">registered in main.rs</text>
+<rect x="40" y="1040" width="820" height="44" rx="6" class="box"/>
+<rect x="40" y="1040" width="820" height="22" rx="6" class="hdr5"/>
+<rect x="40" y="1052" width="820" height="10" class="hdr5"/>
+<text x="450" y="1055" class="ht5" text-anchor="middle">trigger</text>
+<text x="450" y="1078" class="dim" text-anchor="middle">trigger: cron "0 */30 * * * *"  ·  mutex-skip  ·  pipeline slots survive ticks</text>
+<text x="450" y="1132" class="dim" text-anchor="middle">generated by sync_engine::codegen::generate_architecture_svg_file  ·  do not edit</text>
 </svg>

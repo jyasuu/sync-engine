@@ -97,6 +97,36 @@ pub trait StepFactory: Send + Sync {
     ) -> Result<Box<dyn Step>> {
         Err(anyhow!("build_kafka_consume not supported for this factory"))
     }
+
+    /// Build a MergeSlotsStep<T>.
+    fn build_merge_slots(
+        &self,
+        _merge_reads: Vec<String>,
+        _writes:      &str,
+        _append:      bool,
+    ) -> Result<Box<dyn Step>> {
+        Err(anyhow!("build_merge_slots not supported for this factory"))
+    }
+
+    /// Build a SlotToJsonStep<T>.
+    fn build_slot_to_json(
+        &self,
+        _reads:  &str,
+        _writes: &str,
+        _append: bool,
+    ) -> Result<Box<dyn Step>> {
+        Err(anyhow!("build_slot_to_json not supported for this factory"))
+    }
+
+    /// Build a JsonToSlotStep<T>.
+    fn build_json_to_slot(
+        &self,
+        _reads:  &str,
+        _writes: &str,
+        _append: bool,
+    ) -> Result<Box<dyn Step>> {
+        Err(anyhow!("build_json_to_slot not supported for this factory"))
+    }
 }
 
 // ── TypeRegistry ──────────────────────────────────────────────────────────
@@ -142,7 +172,8 @@ impl TypeRegistry {
     #[cfg(feature = "postgres")]
     pub fn register_model<T>(&mut self, name: &str)
     where
-        T: UpsertableInTx + Any + Send + Sync + Clone + serde::Serialize + 'static,
+        T: UpsertableInTx + Any + Send + Sync + Clone
+            + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
         let upsert_factory = ModelFactory::<T> { _phantom: std::marker::PhantomData };
         self.models.insert(name.to_owned(), Arc::new(upsert_factory));
@@ -172,7 +203,8 @@ impl TypeRegistry {
     pub fn register_envelope<Env>(&mut self, name: &str)
     where
         Env: HasEnvelope + serde::de::DeserializeOwned + Send + Sync + 'static,
-        Env::Item: Any + Send + Sync + Clone + 'static,
+        Env::Item: Any + Send + Sync + Clone
+            + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
         let factory = EnvelopeFactory::<Env> {
             _phantom: std::marker::PhantomData,
@@ -308,6 +340,51 @@ impl TypeRegistry {
             .build_kafka_consume(writes, topic, max_messages, timeout_ms, append)
     }
 
+    /// Build a MergeSlotsStep for the given model type.
+    pub fn build_merge_slots(
+        &self,
+        name:        &str,
+        merge_reads: Vec<String>,
+        writes:      &str,
+        append:      bool,
+    ) -> Result<Box<dyn Step>> {
+        self.models.get(name)
+            .or_else(|| self.envelopes.get(name))
+            .ok_or_else(|| anyhow!(
+                "Model/envelope \"{name}\" not registered — \
+                 add registry.register_model::<{name}>(\"{name}\") in main.rs"
+            ))?
+            .build_merge_slots(merge_reads, writes, append)
+    }
+
+    /// Build a SlotToJsonStep for the given model type.
+    pub fn build_slot_to_json(
+        &self,
+        name:   &str,
+        reads:  &str,
+        writes: &str,
+        append: bool,
+    ) -> Result<Box<dyn Step>> {
+        self.models.get(name)
+            .or_else(|| self.envelopes.get(name))
+            .ok_or_else(|| anyhow!("Model/envelope \"{name}\" not registered"))?
+            .build_slot_to_json(reads, writes, append)
+    }
+
+    /// Build a JsonToSlotStep for the given model type.
+    pub fn build_json_to_slot(
+        &self,
+        name:   &str,
+        reads:  &str,
+        writes: &str,
+        append: bool,
+    ) -> Result<Box<dyn Step>> {
+        self.models.get(name)
+            .or_else(|| self.envelopes.get(name))
+            .ok_or_else(|| anyhow!("Model/envelope \"{name}\" not registered"))?
+            .build_json_to_slot(reads, writes, append)
+    }
+
     pub fn get_post_hook(
         &self,
         name: &str,
@@ -353,7 +430,8 @@ struct ModelFactory<T> {
 #[cfg(feature = "postgres")]
 impl<T> StepFactory for ModelFactory<T>
 where
-    T: UpsertableInTx + Any + Send + Sync + Clone + serde::Serialize + 'static,
+    T: UpsertableInTx + Any + Send + Sync + Clone
+        + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
     fn build(&self, params: &HashMap<String, String>) -> Result<Box<dyn Step>> {
         let reads = params.get("reads").cloned().unwrap_or_else(|| "db_rows".into());
@@ -415,6 +493,36 @@ where
     ) -> Result<Box<dyn Step>> {
         use crate::step::kafka::KafkaProduceStep;
         Ok(Box::new(KafkaProduceStep::<T>::new(reads, topic, key_field)))
+    }
+
+    fn build_merge_slots(
+        &self,
+        merge_reads: Vec<String>,
+        writes:      &str,
+        append:      bool,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::multi_transform::MergeSlotsStep;
+        Ok(Box::new(MergeSlotsStep::<T>::new(merge_reads, writes, append)))
+    }
+
+    fn build_slot_to_json(
+        &self,
+        reads:  &str,
+        writes: &str,
+        append: bool,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::json_slot::SlotToJsonStep;
+        Ok(Box::new(SlotToJsonStep::<T>::new(reads, writes, append)))
+    }
+
+    fn build_json_to_slot(
+        &self,
+        reads:  &str,
+        writes: &str,
+        append: bool,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::json_slot::JsonToSlotStep;
+        Ok(Box::new(JsonToSlotStep::<T>::new(reads, writes, append)))
     }
 }
 
@@ -481,7 +589,7 @@ struct EnvelopeFactory<Env> {
 impl<Env> StepFactory for EnvelopeFactory<Env>
 where
     Env: HasEnvelope + serde::de::DeserializeOwned + Send + Sync + 'static,
-    Env::Item: Any + Send + Sync + Clone + 'static,
+    Env::Item: Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
     fn build(&self, params: &HashMap<String, String>) -> Result<Box<dyn Step>> {
         let writes = params.get("writes").cloned().unwrap_or_else(|| "api_rows".into());
@@ -519,6 +627,36 @@ where
             writes, topic, max_messages, timeout_ms, append,
         )))
     }
+
+    fn build_merge_slots(
+        &self,
+        merge_reads: Vec<String>,
+        writes:      &str,
+        append:      bool,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::multi_transform::MergeSlotsStep;
+        Ok(Box::new(MergeSlotsStep::<Env::Item>::new(merge_reads, writes, append)))
+    }
+
+    fn build_slot_to_json(
+        &self,
+        reads:  &str,
+        writes: &str,
+        append: bool,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::json_slot::SlotToJsonStep;
+        Ok(Box::new(SlotToJsonStep::<Env::Item>::new(reads, writes, append)))
+    }
+
+    fn build_json_to_slot(
+        &self,
+        reads:  &str,
+        writes: &str,
+        append: bool,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::json_slot::JsonToSlotStep;
+        Ok(Box::new(JsonToSlotStep::<Env::Item>::new(reads, writes, append)))
+    }
 }
 
 // ── EsModelFactory — for T: EsIndexable ──────────────────────────────────
@@ -536,6 +674,7 @@ impl<T> StepFactory for EsModelFactory<T>
 where
     T: crate::step::elasticsearch::EsIndexable
         + UpsertableInTx
+        + serde::Serialize
         + serde::de::DeserializeOwned
         + Any + Send + Sync + Clone + 'static,
 {
@@ -585,5 +724,26 @@ where
                     accum_slot.unwrap_or_else(|| format!("__accum_{queue}")),
                 )),
         })
+    }
+
+    fn build_merge_slots(
+        &self, merge_reads: Vec<String>, writes: &str, append: bool,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::multi_transform::MergeSlotsStep;
+        Ok(Box::new(MergeSlotsStep::<T>::new(merge_reads, writes, append)))
+    }
+
+    fn build_slot_to_json(
+        &self, reads: &str, writes: &str, append: bool,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::json_slot::SlotToJsonStep;
+        Ok(Box::new(SlotToJsonStep::<T>::new(reads, writes, append)))
+    }
+
+    fn build_json_to_slot(
+        &self, reads: &str, writes: &str, append: bool,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::json_slot::JsonToSlotStep;
+        Ok(Box::new(JsonToSlotStep::<T>::new(reads, writes, append)))
     }
 }

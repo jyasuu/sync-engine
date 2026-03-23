@@ -1,0 +1,113 @@
+# case12-split-transform.toml
+#
+# Pattern: split_transform — fan-out one source slot into multiple output slots.
+# Each registered transform is applied to the same source Vec, writing to a
+# different slot. Use when one API record maps to multiple DB tables.
+#
+# Example: ApiUser → DbUser (users table) + DbUserRole (user_roles table)
+#
+# Changed from case 1:
+#   Two transforms registered in main.rs instead of one
+#   [[main_job.retry_steps]] uses type="split_transform"
+#   Additional slots and tx_upsert steps for the second table
+#
+# main.rs:
+#   registry.register_envelope::<ApiUserResponse>("ApiUserResponse");
+#   registry.register_transform::<ApiUser, DbUser, UserTransform>("UserTransform");
+#   registry.register_transform::<ApiUser, DbUserRole, UserRoleTransform>("UserRoleTransform");
+#   registry.register_model::<DbUser>("DbUser");
+#   registry.register_model::<DbUserRole>("DbUserRole");
+#   sync_engine::run("pipeline.toml", registry).await
+
+[job]
+name = "user-sync"
+
+[job.trigger]
+type = "cron"
+cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+
+[resources.pg]
+type            = "postgres"
+url             = { env = "SINK__DATABASE_URL" }
+max_connections = 5
+
+[resources.auth]
+type          = "oauth2"
+token_url     = { env = "AUTH__TOKEN_URL" }
+client_id     = { env = "AUTH__CLIENT_ID" }
+client_secret = { env = "AUTH__CLIENT_SECRET" }
+
+[resources.http]
+type           = "http_client"
+timeout_secs   = 620
+keepalive_secs = 30
+
+[resources.svc]
+type       = "http_service"
+http       = "http"
+auth       = "auth"
+endpoint   = { env = "SOURCE__USER_ENDPOINT" }
+realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
+
+# ── Slots ─────────────────────────────────────────────────────────────────
+
+[slots.api_rows]
+type  = "ApiUser"
+scope = "window"
+
+# KEY: two output slots — one per target table
+[slots.db_users]
+type  = "DbUser"
+scope = "window"
+
+[slots.db_roles]
+type  = "DbUserRole"
+scope = "window"
+
+[pre_job]
+init_resources = true
+
+[main_job.iterator]
+type           = "date_window"
+start_interval = { env = "SOURCE__START_INTERVAL",    default = "30" }
+end_interval   = { env = "SOURCE__END_INTERVAL",      default = "0" }
+interval_limit = { env = "SOURCE__INTERVAL_LIMIT",    default = "7" }
+sleep_secs     = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
+
+[main_job.retry]
+max_attempts = 5
+backoff_secs = 2
+
+[[main_job.retry_steps]]
+type     = "fetch"
+envelope = "ApiUserResponse"
+writes   = "api_rows"
+append   = false
+
+# KEY: fan-out — both transforms read the same api_rows slot
+[[main_job.retry_steps]]
+type  = "split_transform"
+reads = "api_rows"
+transforms = [
+  { transform = "UserTransform",     writes = "db_users" },
+  { transform = "UserRoleTransform", writes = "db_roles" },
+]
+
+# Commit both tables inside the same retry loop
+[[main_job.retry_steps]]
+type  = "tx_upsert"
+model = "DbUser"
+reads = "db_users"
+
+[[main_job.retry_steps]]
+type  = "tx_upsert"
+model = "DbUserRole"
+reads = "db_roles"
+
+[[post_job.steps]]
+type = "log_summary"
+
+[[post_job.steps]]
+type          = "raw_sql"
+sql           = { env = "SINK__SYNC_SQL", default = "" }
+skip_if_empty = true

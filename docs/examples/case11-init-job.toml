@@ -1,0 +1,136 @@
+# case11-init-job.toml
+#
+# Pattern: [init_job] runs once at startup — after build_context and validate,
+# before the trigger loop. Use for migrations, connectivity checks, and
+# pre-seeding pipeline-scoped slots that every tick can read.
+#
+# Lifecycle:
+#   program start
+#     → build_context   (resources, slots, queues)
+#     → validate        (registry vs pipeline.toml)
+#     → [init_job]      ← new: runs once here
+#     → trigger loop
+#         → pre_job / main_job / post_job  (repeats per tick)
+#
+# Pipeline-scoped slots written in init_job survive all ticks. Job/window
+# slots are irrelevant here — they don't exist yet at init time.
+#
+# Changed from case 1:
+#   [init_job]  added — raw_sql migration + custom hook
+#   [slots.lookup_table]  scope = "pipeline" — written in init, read every tick
+#
+# main.rs additions:
+#   registry.register_post_hook("WarmLookupCache", warm_lookup_cache);
+#   // WarmLookupCache reads an auxiliary table and writes to lookup_table slot
+
+[job]
+name = "user-sync"
+
+[job.trigger]
+type = "cron"
+cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+
+# ── Init-job — runs once at startup ──────────────────────────────────────
+
+# Step 1: connectivity check — fails fast if Postgres is unreachable
+[[init_job.steps]]
+type          = "raw_sql"
+sql           = "SELECT 1"
+skip_if_empty = false
+
+# Step 2: run pending migrations (idempotent SQL file loaded from env)
+[[init_job.steps]]
+type          = "raw_sql"
+sql           = { env = "INIT__MIGRATION_SQL", default = "" }
+skip_if_empty = true    # skip if env var not set (dev without migrations)
+
+# Step 3: warm a pipeline-scoped lookup cache (custom hook in main.rs)
+[[init_job.steps]]
+type = "custom"
+hook = "WarmLookupCache"   # writes to "lookup_table" pipeline slot
+
+# ── Resources ─────────────────────────────────────────────────────────────
+
+[resources.pg]
+type            = "postgres"
+url             = { env = "SINK__DATABASE_URL" }
+max_connections = 5
+
+[resources.auth]
+type          = "oauth2"
+token_url     = { env = "AUTH__TOKEN_URL" }
+client_id     = { env = "AUTH__CLIENT_ID" }
+client_secret = { env = "AUTH__CLIENT_SECRET" }
+
+[resources.http]
+type           = "http_client"
+timeout_secs   = 620
+keepalive_secs = 30
+
+[resources.svc]
+type       = "http_service"
+http       = "http"
+auth       = "auth"
+endpoint   = { env = "SOURCE__USER_ENDPOINT" }
+realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
+
+# ── Slots ─────────────────────────────────────────────────────────────────
+
+[slots.api_rows]
+type  = "ApiUser"
+scope = "window"
+
+[slots.db_rows]
+type  = "DbUser"
+scope = "window"
+
+# KEY: pipeline scope — written once in init_job, readable in every tick
+[slots.lookup_table]
+type  = "DbLookup"      # hypothetical type registered in main.rs
+scope = "pipeline"
+
+# ── Pre-job ───────────────────────────────────────────────────────────────
+
+[pre_job]
+init_resources = true
+
+# ── Main job ──────────────────────────────────────────────────────────────
+
+[main_job.iterator]
+type           = "date_window"
+start_interval = { env = "SOURCE__START_INTERVAL",    default = "30" }
+end_interval   = { env = "SOURCE__END_INTERVAL",      default = "0" }
+interval_limit = { env = "SOURCE__INTERVAL_LIMIT",    default = "7" }
+sleep_secs     = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
+
+[main_job.retry]
+max_attempts = 5
+backoff_secs = 2
+
+[[main_job.retry_steps]]
+type     = "fetch"
+envelope = "ApiUserResponse"
+writes   = "api_rows"
+append   = false
+
+[[main_job.retry_steps]]
+type      = "transform"
+transform = "UserTransform"
+reads     = "api_rows"
+writes    = "db_rows"
+append    = false
+
+[[main_job.retry_steps]]
+type  = "tx_upsert"
+model = "DbUser"
+reads = "db_rows"
+
+# ── Post-job ──────────────────────────────────────────────────────────────
+
+[[post_job.steps]]
+type = "log_summary"
+
+[[post_job.steps]]
+type          = "raw_sql"
+sql           = { env = "SINK__SYNC_SQL", default = "" }
+skip_if_empty = true

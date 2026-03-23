@@ -60,6 +60,10 @@ pub use step::elasticsearch::{EsOp, EsIndexable, EsIndexStep, EsFetchStep};
 #[cfg(feature = "kafka")]
 pub use step::kafka::{KafkaProduceStep, KafkaConsumeStep};
 
+// ── Complex transform steps ───────────────────────────────────────────────
+pub use step::multi_transform::{SplitTransformStep, MergeSlotsStep};
+pub use step::json_slot::{SlotToJsonStep, JsonToSlotStep};
+
 // ── File sinks ────────────────────────────────────────────────────────────
 pub use sinks::FileSink;
 #[cfg(feature = "csv")]
@@ -80,6 +84,8 @@ pub use pipeline_runner::{
     PipelineConfig, ResourceDef, SlotDef, SlotScopeStr, QueueDef,
     PreJobConfig, MainJobConfig, MainStepConfig, IteratorConfig, RetryConfig,
     PostJobConfig, PostStepConfig, SchedulerConfig, TriggerConfig,
+    InitJobConfig, InitStepConfig, SplitTransformEntry,
+    run_init_job,
 };
 
 // ── StandardJob (legacy) ──────────────────────────────────────────────────

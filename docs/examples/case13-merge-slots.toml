@@ -1,0 +1,136 @@
+# case13-merge-slots.toml
+#
+# Pattern: merge_slots — fan-in multiple same-typed slots into one.
+# Use when data arrives from multiple API endpoints (or multiple fetch windows)
+# and needs to be combined before a single sink step.
+#
+# Example: fetch users from two separate API endpoints (primary + legacy),
+# merge both result sets into one slot, then upsert once.
+#
+# Changed from case 1:
+#   Two [resources.svc_*] endpoints + two fetch steps writing to separate slots
+#   merge_slots combines them before tx_upsert
+#
+# main.rs — unchanged from case 1.
+
+[job]
+name = "user-sync"
+
+[job.trigger]
+type = "cron"
+cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+
+[resources.pg]
+type            = "postgres"
+url             = { env = "SINK__DATABASE_URL" }
+max_connections = 5
+
+[resources.auth]
+type          = "oauth2"
+token_url     = { env = "AUTH__TOKEN_URL" }
+client_id     = { env = "AUTH__CLIENT_ID" }
+client_secret = { env = "AUTH__CLIENT_SECRET" }
+
+[resources.http]
+type           = "http_client"
+timeout_secs   = 620
+keepalive_secs = 30
+
+# KEY: two source endpoints
+[resources.svc_primary]
+type       = "http_service"
+http       = "http"
+auth       = "auth"
+endpoint   = { env = "SOURCE__PRIMARY_ENDPOINT" }
+
+[resources.svc_legacy]
+type       = "http_service"
+http       = "http"
+auth       = "auth"
+endpoint   = { env = "SOURCE__LEGACY_ENDPOINT" }
+
+# ── Slots ─────────────────────────────────────────────────────────────────
+
+[slots.api_rows_primary]
+type  = "ApiUser"
+scope = "window"
+
+[slots.api_rows_legacy]
+type  = "ApiUser"
+scope = "window"
+
+# Intermediate transform outputs — same type, two sources
+[slots.db_rows_primary]
+type  = "DbUser"
+scope = "window"
+
+[slots.db_rows_legacy]
+type  = "DbUser"
+scope = "window"
+
+# KEY: merged output — all rows from both sources combined
+[slots.db_rows_all]
+type  = "DbUser"
+scope = "window"
+
+[pre_job]
+init_resources = true
+
+[main_job.iterator]
+type           = "date_window"
+start_interval = { env = "SOURCE__START_INTERVAL",    default = "30" }
+end_interval   = { env = "SOURCE__END_INTERVAL",      default = "0" }
+interval_limit = { env = "SOURCE__INTERVAL_LIMIT",    default = "7" }
+sleep_secs     = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
+
+[main_job.retry]
+max_attempts = 5
+backoff_secs = 2
+
+# Fetch from both endpoints
+[[main_job.retry_steps]]
+type     = "fetch"
+envelope = "ApiUserResponse"
+writes   = "api_rows_primary"
+append   = false
+
+[[main_job.retry_steps]]
+type     = "fetch"
+envelope = "ApiUserResponse"
+writes   = "api_rows_legacy"
+append   = false
+
+# Transform both independently
+[[main_job.retry_steps]]
+type      = "transform"
+transform = "UserTransform"
+reads     = "api_rows_primary"
+writes    = "db_rows_primary"
+append    = false
+
+[[main_job.retry_steps]]
+type      = "transform"
+transform = "UserTransform"
+reads     = "api_rows_legacy"
+writes    = "db_rows_legacy"
+append    = false
+
+# KEY: merge both results into one slot before the single upsert
+[[main_job.retry_steps]]
+type        = "merge_slots"
+model       = "DbUser"
+merge_reads = ["db_rows_primary", "db_rows_legacy"]
+writes      = "db_rows_all"
+
+[[main_job.retry_steps]]
+type  = "tx_upsert"
+model = "DbUser"
+reads = "db_rows_all"
+
+[[post_job.steps]]
+type = "log_summary"
+
+[[post_job.steps]]
+type          = "raw_sql"
+sql           = { env = "SINK__SYNC_SQL", default = "" }
+skip_if_empty = true

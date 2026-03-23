@@ -17,6 +17,10 @@ pub mod elasticsearch;
 #[cfg(feature = "kafka")]
 pub mod kafka;
 
+// ── Complex transform steps ───────────────────────────────────────────────
+pub mod multi_transform;
+pub mod json_slot;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;

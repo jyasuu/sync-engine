@@ -1,0 +1,189 @@
+# case14-slot-json.toml
+#
+# Two patterns using the JSON slot steps.
+#
+# ── Pattern A: slot_to_json for ES passthrough ────────────────────────────
+# Serialize DbUser rows to serde_json::Value so they can be indexed into
+# Elasticsearch without implementing EsIndexable. The JSON representation
+# is forwarded directly — field names come from the serde attributes on
+# DbUser (snake_case by default).
+#
+# Use when:
+#   - You want to index records into ES with their natural serialization
+#   - The model doesn't implement EsIndexable
+#   - You need a JSON snapshot for a raw_sql JSONB column or audit log
+#
+# ── Pattern B: json_to_slot for Kafka → Postgres bridging ─────────────────
+# A Kafka topic carries JSON payloads. kafka_consume writes
+# Vec<serde_json::Value> into a slot; json_to_slot deserializes to DbUser
+# before the normal tx_upsert sink.
+#
+# Use when:
+#   - A Kafka topic publishes JSON that matches your model's serde shape
+#   - You want to reuse existing transforms on Kafka-sourced data
+#
+# main.rs — pattern A: register_model_es not needed; register_model suffices
+# main.rs — pattern B: unchanged from case 1
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PATTERN A — slot_to_json then es_index via raw JSON
+# (Requires feature "elasticsearch" in Cargo.toml)
+# ═══════════════════════════════════════════════════════════════════════════
+
+[job]
+name = "user-sync"
+
+[job.trigger]
+type = "cron"
+cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+
+[resources.auth]
+type          = "oauth2"
+token_url     = { env = "AUTH__TOKEN_URL" }
+client_id     = { env = "AUTH__CLIENT_ID" }
+client_secret = { env = "AUTH__CLIENT_SECRET" }
+
+[resources.http]
+type           = "http_client"
+timeout_secs   = 620
+keepalive_secs = 30
+
+[resources.svc]
+type       = "http_service"
+http       = "http"
+auth       = "auth"
+endpoint   = { env = "SOURCE__USER_ENDPOINT" }
+realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
+
+[resources.es]
+type = "elasticsearch"
+url  = { env = "ES_URL", default = "http://localhost:9200" }
+
+[slots.api_rows]
+type  = "ApiUser"
+scope = "window"
+
+[slots.db_rows]
+type  = "DbUser"
+scope = "window"
+
+# KEY: JSON representation of db_rows — no EsIndexable needed
+[slots.db_rows_json]
+type  = "serde_json::Value"
+scope = "window"
+
+[pre_job]
+init_resources = true
+
+[main_job.iterator]
+type           = "date_window"
+start_interval = { env = "SOURCE__START_INTERVAL",    default = "30" }
+end_interval   = { env = "SOURCE__END_INTERVAL",      default = "0" }
+interval_limit = { env = "SOURCE__INTERVAL_LIMIT",    default = "7" }
+sleep_secs     = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
+
+[main_job.retry]
+max_attempts = 5
+backoff_secs = 2
+
+[[main_job.retry_steps]]
+type     = "fetch"
+envelope = "ApiUserResponse"
+writes   = "api_rows"
+append   = false
+
+[[main_job.retry_steps]]
+type      = "transform"
+transform = "UserTransform"
+reads     = "api_rows"
+writes    = "db_rows"
+append    = false
+
+# KEY: serialize db_rows → JSON values
+[[main_job.retry_steps]]
+type   = "slot_to_json"
+model  = "DbUser"
+reads  = "db_rows"
+writes = "db_rows_json"
+
+# Index the JSON values directly — _id is derived from "pccuid" field in the JSON
+# Note: for field-based _id, implement EsIndexable and use es_index directly instead.
+# This pattern is best for "index everything as-is" without per-field customisation.
+# [[main_job.retry_steps]]
+# type  = "es_index"
+# model = "DbUser"
+# index = "users"
+# reads = "db_rows"
+# op    = "upsert"
+# (Use es_index with register_model_es if you need a custom _id field)
+
+[[post_job.steps]]
+type = "log_summary"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PATTERN B — json_to_slot: Kafka JSON → DbUser → Postgres
+# Replace the entire [job] block above with this config.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# [job]
+# name = "user-sync"
+#
+# [job.trigger]
+# type = "cron"
+# cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+#
+# [resources.pg]
+# type            = "postgres"
+# url             = { env = "SINK__DATABASE_URL" }
+# max_connections = 5
+#
+# [resources.kafka]
+# type     = "kafka"
+# brokers  = { env = "KAFKA_BROKERS", default = "localhost:9092" }
+# group_id = { env = "KAFKA_GROUP_ID", default = "user-sync" }
+# topic    = { env = "KAFKA_SOURCE_TOPIC" }
+#
+# [slots.raw_json]
+# type  = "serde_json::Value"
+# scope = "window"
+#
+# [slots.db_rows]
+# type  = "DbUser"
+# scope = "window"
+#
+# [pre_job]
+# init_resources = true
+#
+# [main_job.iterator]
+# type           = "date_window"
+# start_interval = "0"
+# end_interval   = "0"
+# interval_limit = "1"
+# sleep_secs     = "0"
+#
+# [main_job.retry]
+# max_attempts = 3
+# backoff_secs = 1
+#
+# # Step 1: consume raw JSON messages from Kafka
+# [[main_job.retry_steps]]
+# type         = "kafka_consume"
+# model        = "DbUser"          # used to select the deserialize type for json_to_slot
+# writes       = "raw_json"
+# topic        = { env = "KAFKA_SOURCE_TOPIC" }
+# max_messages = 500
+#
+# # KEY: deserialize JSON slot → typed DbUser slot
+# [[main_job.retry_steps]]
+# type   = "json_to_slot"
+# model  = "DbUser"
+# reads  = "raw_json"
+# writes = "db_rows"
+#
+# [[main_job.retry_steps]]
+# type  = "tx_upsert"
+# model = "DbUser"
+# reads = "db_rows"
+#
+# [[post_job.steps]]
+# type = "log_summary"

@@ -94,14 +94,10 @@ fn gen_struct(name: &str, def: &RecordDef) -> String {
         // Fields will be camelCase Rust identifiers — suppress the lint.
         writeln!(out, "#[allow(non_snake_case)]").unwrap();
     }
-    // API records (with fetcher) need Deserialize.
-    // DB records (with sink) need both Deserialize and Serialize so they can
-    // be published to a RabbitMQ queue in the producer/consumer pattern.
-    let derives = if def.sink.is_some() {
-        "#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]"
-    } else {
-        "#[derive(Debug, Clone, serde::Deserialize)]"
-    };
+    // All records derive both Deserialize and Serialize.
+    // - API records (fetcher): Serialize enables slot_to_json passthrough to ES/Kafka.
+    // - DB records (sink): Serialize is required for RabbitMQ queue and slot_to_json.
+    let derives = "#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]";
     writeln!(out, "{derives}").unwrap();
     if let Some(ref s) = def.serde_rename {
         writeln!(out, "#[serde(rename_all = \"{s}\")]").unwrap();
@@ -864,6 +860,18 @@ fn build_svg(schema_path: &Path, pipeline_path: &Path) -> String {
         })
         .unwrap_or_else(|| "trigger: cron \"0 */30 * * * *\"  ·  mutex-skip".to_owned());
 
+    // Detect [init_job] presence for SVG lifecycle section
+    let has_init_job = pipeline_val.as_ref()
+        .map(|v| v.get("init_job").is_some())
+        .unwrap_or(false);
+
+    let init_job_steps: Vec<String> = pipeline_val.as_ref()
+        .and_then(|v| v.get("init_job")?.get("steps")?.as_array())
+        .map(|arr| arr.iter()
+            .filter_map(|s| s.get("type").and_then(|t| t.as_str()).map(str::to_owned))
+            .collect())
+        .unwrap_or_default();
+
     // ── Layout constants ──────────────────────────────────────────────────
     let w           = 900i32;
     let col_gap     = 40i32;
@@ -898,7 +906,8 @@ fn build_svg(schema_path: &Path, pipeline_path: &Path) -> String {
     // ── Build SVG string ──────────────────────────────────────────────────
     let mut svg = String::new();
 
-    let total_h = 80 + schema_h + 40 + 280 + 40 + 160 + 40 + 80;
+    let init_h = if has_init_job { 80i32 + 26 * init_job_steps.len() as i32 } else { 0i32 };
+    let total_h = 80 + 60 + schema_h + 40 + 280 + 40 + init_h + 160 + 40 + 80;
     svg.push_str(&format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{total_h}\" \
          viewBox=\"0 0 {w} {total_h}\" \
@@ -946,8 +955,36 @@ fn build_svg(schema_path: &Path, pipeline_path: &Path) -> String {
          <text x=\"40\" y=\"62\" class=\"sub\">pattern: {pattern_label}  ·  {trigger_label}  ·  sink: {table_name}</text>\n"
     ));
 
+    // ── Lifecycle strip ────────────────────────────────────────────────────
+    // Shows the full startup → trigger → tick sequence at a glance.
+    let lifecycle_y = 74i32;
+    let lc_items: &[(&str, &str)] = if has_init_job {
+        &[("startup", "hdr5"), ("init_job", "hdr3"), ("trigger", "hdr"), ("pre_job", "hdr2"),
+          ("main_job", "hdr2"), ("post_job", "hdr2")]
+    } else {
+        &[("startup", "hdr5"), ("trigger", "hdr"), ("pre_job", "hdr2"),
+          ("main_job", "hdr2"), ("post_job", "hdr2")]
+    };
+    let lc_w = (w - 40) / lc_items.len() as i32;
+    for (i, (label, hdr)) in lc_items.iter().enumerate() {
+        let lx = 20 + i as i32 * lc_w;
+        let tc = match *hdr { "hdr" => "ht", "hdr2" => "ht2", "hdr3" => "ht3", _ => "ht5" };
+        svg.push_str(&format!(
+            "<rect x=\"{lx}\" y=\"{lifecycle_y}\" width=\"{}\" height=\"20\" rx=\"0\" class=\"{hdr}\"/>\n\
+             <text x=\"{}\" y=\"{}\" class=\"{tc}\" text-anchor=\"middle\" font-size=\"11\">{label}</text>\n",
+            lc_w - 1,
+            lx + lc_w / 2, lifecycle_y + 13
+        ));
+        if i + 1 < lc_items.len() {
+            svg.push_str(&format!(
+                "<text x=\"{}\" y=\"{}\" class=\"dim\" font-size=\"10\">→</text>\n",
+                lx + lc_w - 6, lifecycle_y + 13
+            ));
+        }
+    }
+
     // ── Schema section ────────────────────────────────────────────────────
-    let sy = 80i32;
+    let sy = 80 + 30i32;  // shifted down to make room for lifecycle strip
     svg.push_str(&format!(
         "<rect x=\"20\" y=\"{sy}\" width=\"{}\" height=\"{schema_h}\" rx=\"10\" class=\"box\"/>\n\
          <text x=\"40\" y=\"{}\" class=\"dim\">schema.toml</text>\n",
@@ -991,8 +1028,37 @@ fn build_svg(schema_path: &Path, pipeline_path: &Path) -> String {
         c2x + box_w, c3x - 2
     ));
 
+    // ── Init-job section (optional) ───────────────────────────────────────
+    let init_section_h = init_h;
+    let iy = sy + schema_h + 30i32;
+
+    if has_init_job {
+        svg.push_str(&format!(
+            "<rect x=\"20\" y=\"{iy}\" width=\"{}\" height=\"{init_section_h}\" rx=\"10\" class=\"box\"/>\n\
+             <text x=\"40\" y=\"{}\" class=\"dim\">pipeline.toml  ·  [init_job]  — runs once at startup</text>\n",
+            w - 40, iy + 18
+        ));
+
+        let ij_step_h = 26i32;
+        let ij_steps_label = if init_job_steps.is_empty() {
+            vec!["(no steps declared)".to_owned()]
+        } else {
+            init_job_steps.clone()
+        };
+        for (i, step_type) in ij_steps_label.iter().enumerate() {
+            let ssx = 40i32;
+            let ssy = iy + 28 + i as i32 * ij_step_h;
+            svg.push_str(&format!(
+                "<rect x=\"{ssx}\" y=\"{ssy}\" width=\"{}\" height=\"{}\" rx=\"4\" class=\"hdr3\"/>\n\
+                 <text x=\"{}\" y=\"{}\" class=\"ht3\" font-size=\"12\">{step_type}</text>\n",
+                w - 80, ij_step_h - 2,
+                ssx + 8, ssy + 14
+            ));
+        }
+    }
+
     // ── Pipeline section ──────────────────────────────────────────────────
-    let py     = sy + schema_h + 30i32;
+    let py     = iy + init_section_h + if has_init_job { 14i32 } else { 0i32 };
     let pipe_h = 280i32;
     svg.push_str(&format!(
         "<rect x=\"20\" y=\"{py}\" width=\"{}\" height=\"{pipe_h}\" rx=\"10\" class=\"box\"/>\n\
