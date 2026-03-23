@@ -54,30 +54,6 @@
 Defines the API record shape, DB target shape, and field mapping rules.  
 `build.rs` generates all Rust structs and trait implementations from this file.
 
-### `[record.ApiUser]`  _API source record_
-
-Response envelope field: `data`  
-
-| Field | Type |
-|-------|------|
-| `pccuid` | `i64` |
-| `sso_acct` | `String` |
-| `fact_no` | `String` |
-| `local_fact_no` | `Option<String>` |
-| `chinese_nm` | `Option<String>` |
-| `local_pnl_nm` | `Option<String>` |
-| `english_nm` | `Option<String>` |
-| `contact_mail` | `Option<String>` |
-| `sex` | `Option<String>` |
-| `lo_posi_nm` | `Option<String>` |
-| `disabled` | `bool` |
-| `disabled_date` | `Option<i64>` |
-| `update_date` | `i64` |
-| `lo_dept_nm` | `Option<String>` |
-| `tel` | `Option<String>` |
-| `leave_mk` | `String` |
-| `acct_type` | `i32` |
-
 ### `[record.DbUser]`  _DB target record_
 
 Table: `global_users` · Primary key: `pccuid` · Upsert: `true`  
@@ -99,6 +75,30 @@ Table: `global_users` · Primary key: `pccuid` · Upsert: `true`
 | `update_date` | `DateTime<Utc>` |
 | `lo_dept_nm` | `String` |
 | `tel` | `String` |
+| `leave_mk` | `String` |
+| `acct_type` | `i32` |
+
+### `[record.ApiUser]`  _API source record_
+
+Response envelope field: `data`  
+
+| Field | Type |
+|-------|------|
+| `pccuid` | `i64` |
+| `sso_acct` | `String` |
+| `fact_no` | `String` |
+| `local_fact_no` | `Option<String>` |
+| `chinese_nm` | `Option<String>` |
+| `local_pnl_nm` | `Option<String>` |
+| `english_nm` | `Option<String>` |
+| `contact_mail` | `Option<String>` |
+| `sex` | `Option<String>` |
+| `lo_posi_nm` | `Option<String>` |
+| `disabled` | `bool` |
+| `disabled_date` | `Option<i64>` |
+| `update_date` | `i64` |
+| `lo_dept_nm` | `Option<String>` |
+| `tel` | `Option<String>` |
 | `leave_mk` | `String` |
 | `acct_type` | `i32` |
 

@@ -1,6 +1,6 @@
 // sync-engine/src/lib.rs
 pub mod codegen;
-pub use codegen::{generate, generate_architecture_svg, generate_config_doc, generate_pipeline_skeleton};
+pub use codegen::{generate, generate_architecture_svg, generate_architecture_svg_file, generate_config_doc, generate_pipeline_skeleton};
 pub mod components;
 pub mod config_value;
 pub mod context;
