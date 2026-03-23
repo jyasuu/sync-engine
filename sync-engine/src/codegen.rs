@@ -617,3 +617,414 @@ fn toml_value_display(v: &toml::Value) -> String {
         _                       => "—".into(),
     }
 }
+
+// ── Architecture SVG generator ────────────────────────────────────────────
+
+/// Generates `ARCHITECTURE.md` — a Markdown file containing a self-contained
+/// SVG diagram of the full pipeline architecture for this job. Called from
+/// `build.rs` after `generate()`.
+///
+/// The SVG reflects the actual schema (record names, table, fields) and
+/// pipeline config (job name, pattern, scheduler cron) so it stays in sync
+/// with the code automatically.
+///
+/// ```rust,no_run
+/// // user-sync/build.rs
+/// fn main() {
+///     sync_engine::codegen::generate("schema.toml");
+///     sync_engine::codegen::generate_architecture_svg(
+///         "schema.toml", "pipeline.toml", "ARCHITECTURE.md"
+///     );
+/// }
+/// ```
+pub fn generate_architecture_svg(
+    schema_path:   impl AsRef<Path>,
+    pipeline_path: impl AsRef<Path>,
+    out_path:      impl AsRef<Path>,
+) {
+    let schema_path   = schema_path.as_ref();
+    let pipeline_path = pipeline_path.as_ref();
+    let out_path      = out_path.as_ref();
+
+    println!("cargo:rerun-if-changed={}", schema_path.display());
+    println!("cargo:rerun-if-changed={}", pipeline_path.display());
+
+    // ── Parse schema ──────────────────────────────────────────────────────
+    let schema_raw = fs::read_to_string(schema_path)
+        .unwrap_or_else(|_| panic!("Cannot read {}", schema_path.display()));
+    let schema: Schema = toml::from_str(&schema_raw)
+        .unwrap_or_else(|e| panic!("Cannot parse {}: {e}", schema_path.display()));
+
+    let mut api_name      = "ApiRecord".to_owned();
+    let mut db_name       = "DbRecord".to_owned();
+    let mut table_name    = "records".to_owned();
+    let mut api_fields: Vec<String> = vec![];
+    let mut db_fields:  Vec<String> = vec![];
+    let mut transform_name = "Transform".to_owned();
+    let mut envelope_name  = "ApiResponse".to_owned();
+    let mut mapping_rules: Vec<(String, String)> = vec![];
+
+    for (name, def) in &schema.record {
+        if def.fetcher.is_some() {
+            api_name     = name.clone();
+            envelope_name = format!("{name}Response");
+            api_fields   = def.fields.iter().map(|f| {
+                let ty = if f.ty.starts_with("Option") { "?" } else { "" };
+                format!("{}{}", f.name, ty)
+            }).collect();
+        }
+        if def.sink.is_some() {
+            db_name = name.clone();
+            if let Some(ref sh) = def.sink {
+                table_name = sh.table.clone();
+            }
+            db_fields = def.fields.iter().map(|f| f.name.clone()).collect();
+        }
+    }
+    for mapping in schema.mapping.values() {
+        transform_name = mapping.name.clone();
+        mapping_rules = mapping.rules.iter()
+            .map(|r| (r.field.clone(), r.rule.clone()))
+            .take(8)
+            .collect();
+    }
+
+    // ── Parse pipeline (best-effort — file may not exist yet) ─────────────
+    let job_name  = fs::read_to_string(pipeline_path).ok()
+        .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+        .and_then(|v| v.get("job")?.get("name")?.as_str().map(str::to_owned))
+        .unwrap_or_else(|| table_name.replace('_', "-"));
+
+    let cron = fs::read_to_string(pipeline_path).ok()
+        .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+        .and_then(|v| {
+            let sch = v.get("job")?.get("scheduler")?;
+            if let Some(s) = sch.get("cron")?.as_str() {
+                Some(s.to_owned())
+            } else {
+                sch.get("cron")?.get("default")?.as_str().map(str::to_owned)
+            }
+        })
+        .unwrap_or_else(|| "0 */30 * * * *".to_owned());
+
+    let has_queue = fs::read_to_string(pipeline_path).ok()
+        .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+        .map(|v| v.get("queues").is_some())
+        .unwrap_or(false);
+
+    let sink_label = if has_queue { "send_to_queue" } else { "tx_upsert" };
+    let pattern_label = if has_queue { "case 3/4 — async queue" } else { "case 1 — tx per window" };
+
+    // ── Build SVG ─────────────────────────────────────────────────────────
+    // Layout constants
+    let w = 900i32;
+    let col_gap = 40i32;
+    let box_w = (w - col_gap * 4) / 3;  // three main columns
+    let row_h = 36i32;
+    let section_pad = 14i32;
+
+    // Truncate long field lists
+    let max_fields = 10usize;
+    let api_display: Vec<String> = api_fields.iter().take(max_fields).cloned()
+        .chain(if api_fields.len() > max_fields { vec![format!("… +{}", api_fields.len() - max_fields)] } else { vec![] })
+        .collect();
+    let db_display: Vec<String>  = db_fields.iter().take(max_fields).cloned()
+        .chain(if db_fields.len() > max_fields { vec![format!("… +{}", db_fields.len() - max_fields)] } else { vec![] })
+        .collect();
+    let rule_display: Vec<String> = mapping_rules.iter()
+        .map(|(f, r)| format!("{f}  →  {r}"))
+        .collect();
+
+    let api_box_h  = section_pad * 2 + row_h * api_display.len() as i32 + 20;
+    let db_box_h   = section_pad * 2 + row_h * db_display.len() as i32 + 20;
+    let rule_box_h = section_pad * 2 + row_h * rule_display.len() as i32 + 20;
+    let schema_h   = api_box_h.max(db_box_h).max(rule_box_h) + 60;
+
+    // ── Columns x positions
+    let c1x = col_gap;
+    let c2x = col_gap * 2 + box_w;
+    let c3x = col_gap * 3 + box_w * 2;
+
+    let mut svg = String::new();
+
+    // SVG header — static CSS/defs pushed directly (not through format!) to avoid
+    // Rust 2021 treating #888780 as a numeric prefix and `auto-start-reverse` as
+    // a prefixed identifier inside format string literals.
+    let total_h = 80 + schema_h + 40 + 280 + 40 + 160 + 40 + 80;
+    svg.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{total_h}\" \
+         viewBox=\"0 0 {w} {total_h}\" \
+         font-family=\"ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace\" \
+         font-size=\"13\">\n"
+    ));
+    svg.push_str(
+        "<style>\n\
+         .bg   { fill:#f8f8f6; }\n\
+         .box  { fill:#fff; stroke:#d4d2c8; stroke-width:1; }\n\
+         .hdr  { fill:#eeedfe; stroke:#afa9ec; stroke-width:1; }\n\
+         .hdr2 { fill:#e1f5ee; stroke:#5dcaa5; stroke-width:1; }\n\
+         .hdr3 { fill:#faeeda; stroke:#ef9f27; stroke-width:1; }\n\
+         .hdr4 { fill:#faece7; stroke:#f0997b; stroke-width:1; }\n\
+         .hdr5 { fill:#f1efe8; stroke:#b4b2a9; stroke-width:1; }\n\
+         .ht   { fill:#3c3489; font-weight:600; font-size:14px; }\n\
+         .ht2  { fill:#085041; font-weight:600; font-size:14px; }\n\
+         .ht3  { fill:#633806; font-weight:600; font-size:14px; }\n\
+         .ht4  { fill:#712b13; font-weight:600; font-size:14px; }\n\
+         .ht5  { fill:#444441; font-weight:600; font-size:14px; }\n\
+         .lbl  { fill:#2c2c2a; font-size:12px; }\n\
+         .dim  { fill:#888780; font-size:11px; }\n\
+         .arr  { stroke:#888780; stroke-width:1.5; fill:none; marker-end:url(#arr); }\n\
+         .arr2 { stroke:#378add; stroke-width:1.5; fill:none; marker-end:url(#arr2); }\n\
+         .dash { stroke:#b4b2a9; stroke-width:1; stroke-dasharray:4 3; fill:none; }\n\
+         .title { fill:#2c2c2a; font-size:18px; font-weight:600; font-family:ui-sans-serif,system-ui,sans-serif; }\n\
+         .sub   { fill:#888780; font-size:12px; font-family:ui-sans-serif,system-ui,sans-serif; }\n\
+         </style>\n\
+         <defs>\n\
+         <marker id=\"arr\" viewBox=\"0 0 10 10\" refX=\"8\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto-start-reverse\">\n\
+           <path d=\"M2 1L8 5L2 9\" fill=\"none\" stroke=\"#888780\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n\
+         </marker>\n\
+         <marker id=\"arr2\" viewBox=\"0 0 10 10\" refX=\"8\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto-start-reverse\">\n\
+           <path d=\"M2 1L8 5L2 9\" fill=\"none\" stroke=\"#378add\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n\
+         </marker>\n\
+         </defs>\n"
+    );
+    svg.push_str(&format!("<rect width=\"{w}\" height=\"{total_h}\" class=\"bg\" rx=\"0\"/>\n"));
+
+    // ── Title ──────────────────────────────────────────────────────────────
+    svg.push_str(&format!(
+        r#"<text x="40" y="44" class="title">{job_name}  —  pipeline architecture</text>
+<text x="40" y="62" class="sub">pattern: {pattern_label}  ·  scheduler: {cron}  ·  sink: {table_name}</text>
+"#
+    ));
+
+    // ── Schema section ────────────────────────────────────────────────────
+    let sy = 80i32;
+    svg.push_str(&format!(
+        r#"<rect x="20" y="{sy}" width="{}" height="{schema_h}" rx="10" class="box"/>
+<text x="40" y="{}" class="dim">schema.toml</text>
+"#,
+        w - 40, sy + 18
+    ));
+
+    // Helper: draw a record box
+    let mut draw_box = |x: i32, y: i32, w_b: i32, header_class: &str, text_class: &str,
+                         title: &str, subtitle: &str, fields: &[String]| -> String {
+        let h = section_pad * 2 + row_h * fields.len() as i32 + 24;
+        let hdr_fill_y = y + 24;
+        let title_x = x + 12;
+        let title_y = y + 20;
+        let sub_x = x + 12;
+        let sub_y = y + 34;
+        let mut s = format!(
+            "<rect x=\"{x}\" y=\"{y}\" width=\"{w_b}\" height=\"{h}\" rx=\"6\" class=\"box\"/>\n\
+             <rect x=\"{x}\" y=\"{y}\" width=\"{w_b}\" height=\"36\" rx=\"6\" class=\"{header_class}\"/>\n\
+             <rect x=\"{x}\" y=\"{hdr_fill_y}\" width=\"{w_b}\" height=\"12\" class=\"{header_class}\"/>\n\
+             <text x=\"{title_x}\" y=\"{title_y}\" class=\"{text_class}\">{title}</text>\n\
+             <text x=\"{sub_x}\" y=\"{sub_y}\" class=\"dim\">{subtitle}</text>\n"
+        );
+        for (i, f) in fields.iter().enumerate() {
+            let fy = y + 36 + section_pad + i as i32 * row_h + row_h / 2;
+            let fx = x + 16;
+            s.push_str(&format!(
+                "<text x=\"{fx}\" y=\"{fy}\" class=\"lbl\">{f}</text>\n"
+            ));
+        }
+        s
+    };
+
+    let box_y = sy + 30i32;
+    svg.push_str(&draw_box(c1x, box_y, box_w, "hdr", "ht",
+        &envelope_name, &format!("source: {api_name}"), &api_display));
+    svg.push_str(&draw_box(c2x, box_y, box_w, "hdr4", "ht4",
+        &transform_name, &format!("{api_name} → {db_name}"), &rule_display));
+    svg.push_str(&draw_box(c3x, box_y, box_w, "hdr2", "ht2",
+        &db_name, &format!("sink: {table_name}"), &db_display));
+
+    // Arrows between schema boxes
+    let mid_y = box_y + 18;
+    svg.push_str(&format!(
+        r#"<line x1="{}" y1="{mid_y}" x2="{}" y2="{mid_y}" class="arr2"/>
+<line x1="{}" y1="{mid_y}" x2="{}" y2="{mid_y}" class="arr2"/>
+"#,
+        c1x + box_w, c2x - 2,
+        c2x + box_w, c3x - 2
+    ));
+
+    // ── Pipeline section ──────────────────────────────────────────────────
+    let py = sy + schema_h + 30i32;
+    let pipe_h = 280i32;
+    svg.push_str(&format!(
+        r#"<rect x="20" y="{py}" width="{}" height="{pipe_h}" rx="10" class="box"/>
+<text x="40" y="{}" class="dim">pipeline.toml  ·  main_job</text>
+"#,
+        w - 40, py + 18
+    ));
+
+    // Pipeline step boxes — horizontal flow
+    let steps: &[(&str, &str, &str)] = &[
+        ("pre_job", "resources", "hdr"),
+        ("fetch", &format!("→ {api_name}"), "hdr"),
+        ("transform", &format!("→ {db_name}"), "hdr4"),
+        (sink_label, &format!("→ {table_name}"), "hdr2"),
+        ("post_job", "summary + hooks", "hdr3"),
+    ];
+    let step_w = (w - 80 - (steps.len() as i32 - 1) * 16) / steps.len() as i32;
+    let step_y = py + 34i32;
+    let step_h = 56i32;
+
+    for (i, (label, sub, hdr)) in steps.iter().enumerate() {
+        let sx2 = 40 + i as i32 * (step_w + 16);
+        let tc = match *hdr {
+            "hdr"  => "ht",
+            "hdr2" => "ht2",
+            "hdr3" => "ht3",
+            "hdr4" => "ht4",
+            _      => "ht5",
+        };
+        svg.push_str(&format!(
+            r#"<rect x="{sx2}" y="{step_y}" width="{step_w}" height="{step_h}" rx="6" class="box"/>
+<rect x="{sx2}" y="{step_y}" width="{step_w}" height="28" rx="6" class="{hdr}"/>
+<rect x="{sx2}" y="{}" width="{step_w}" height="14" class="{hdr}"/>
+<text x="{}" y="{}" class="{tc}" text-anchor="middle">{label}</text>
+<text x="{}" y="{}" class="dim" text-anchor="middle">{sub}</text>
+"#,
+            step_y + 14,
+            sx2 + step_w / 2, step_y + 18,
+            sx2 + step_w / 2, step_y + 44
+        ));
+        if i + 1 < steps.len() {
+            let ax = sx2 + step_w;
+            let ay = step_y + step_h / 2;
+            svg.push_str(&format!(
+                r#"<line x1="{ax}" y1="{ay}" x2="{}" y2="{ay}" class="arr2"/>
+"#, ax + 14
+            ));
+        }
+    }
+
+    // Iterator + retry annotations
+    let ann_y = step_y + step_h + 16i32;
+    svg.push_str(&format!(
+        r#"<rect x="40" y="{ann_y}" width="{}" height="22" rx="4" class="dash"/>
+<text x="{}" y="{}" class="dim" text-anchor="middle">date_window iterator  ·  retry(max=5, backoff=2s)  ·  sleep between windows</text>
+"#,
+        w - 80,
+        w / 2, ann_y + 14
+    ));
+
+    let slot_y = ann_y + 36i32;
+    svg.push_str(&format!(
+        "<text x=\"40\" y=\"{slot_y}\" class=\"dim\">data flow:</text>\n"
+    ));
+    let flow_items: Vec<(&str, &str)> = vec![
+        ("HTTP response", "#378add"),
+        ("api_rows slot", "#7f77dd"),
+        (db_name.as_str(), "#378add"),
+        (if has_queue { "queue / consumer" } else { "db_rows slot" }, "#7f77dd"),
+        (table_name.as_str(), "#1d9e75"),
+    ];
+    let fi_w = (w - 80) / flow_items.len() as i32;
+    for (i, (lbl, color)) in flow_items.iter().enumerate() {
+        let fx = 40 + i as i32 * fi_w + fi_w / 2;
+        let fy = slot_y + 24;
+        let rx = 40 + i as i32 * fi_w + 4;
+        let rw = fi_w - 8;
+        svg.push_str(&format!(
+            "<rect x=\"{rx}\" y=\"{fy}\" width=\"{rw}\" height=\"24\" rx=\"4\" \
+             fill=\"{color}\" opacity=\"0.15\" stroke=\"{color}\" stroke-width=\"0.5\"/>\n\
+             <text x=\"{fx}\" y=\"{}\" class=\"lbl\" text-anchor=\"middle\" fill=\"{color}\">{lbl}</text>\n",
+            fy + 15
+        ));
+        if i + 1 < flow_items.len() {
+            let lx1 = 40 + i as i32 * fi_w + fi_w - 4;
+            let lx2 = 40 + (i + 1) as i32 * fi_w + 4;
+            let ly  = fy + 12;
+            svg.push_str(&format!(
+                "<line x1=\"{lx1}\" y1=\"{ly}\" x2=\"{lx2}\" y2=\"{ly}\" \
+                 stroke=\"{color}\" stroke-width=\"1\" marker-end=\"url(#arr2)\"/>\n"
+            ));
+        }
+    }
+
+    // ── Post-job / scheduler section ──────────────────────────────────────
+    let qy = py + pipe_h + 24i32;
+    let qh = 160i32;
+    svg.push_str(&format!(
+        r#"<rect x="20" y="{qy}" width="{}" height="{qh}" rx="10" class="box"/>
+<text x="40" y="{}" class="dim">post_job  +  scheduler</text>
+"#,
+        w - 40, qy + 18
+    ));
+
+    let pj_items = vec![
+        ("log_summary", "fetched · upserted · skipped", "hdr3", "ht3"),
+        ("raw_sql", "post-sync SQL", "hdr3", "ht3"),
+        (if has_queue { "drain_queue" } else { "—" }, "await consumer", "hdr3", "ht3"),
+        ("custom hook", "registered in main.rs", "hdr3", "ht3"),
+    ];
+    let pj_w = (w - 80 - 3 * 16) / 4;
+    for (i, (lbl, sub, hdr, tc)) in pj_items.iter().enumerate() {
+        let px2 = 40 + i as i32 * (pj_w + 16);
+        let py2 = qy + 28i32;
+        svg.push_str(&format!(
+            r#"<rect x="{px2}" y="{py2}" width="{pj_w}" height="50" rx="6" class="box"/>
+<rect x="{px2}" y="{py2}" width="{pj_w}" height="26" rx="6" class="{hdr}"/>
+<rect x="{px2}" y="{}" width="{pj_w}" height="12" class="{hdr}"/>
+<text x="{}" y="{}" class="{tc}" text-anchor="middle">{lbl}</text>
+<text x="{}" y="{}" class="dim" text-anchor="middle">{sub}</text>
+"#,
+            py2 + 14,
+            px2 + pj_w / 2, py2 + 17,
+            px2 + pj_w / 2, py2 + 42
+        ));
+    }
+
+    let sch_y = qy + 92i32;
+    svg.push_str(&format!(
+        r#"<rect x="40" y="{sch_y}" width="{}" height="44" rx="6" class="box"/>
+<rect x="40" y="{sch_y}" width="{}" height="22" rx="6" class="hdr5"/>
+<rect x="40" y="{}" width="{}" height="10" class="hdr5"/>
+<text x="{}" y="{}" class="ht5" text-anchor="middle">cron scheduler</text>
+<text x="{}" y="{}" class="dim" text-anchor="middle">cron="{cron}"  ·  mutex-skip if previous tick still running  ·  pipeline slots survive ticks</text>
+"#,
+        w - 80, w - 80,
+        sch_y + 12, w - 80,
+        w / 2, sch_y + 15,
+        w / 2, sch_y + 38
+    ));
+
+    // ── Footer ────────────────────────────────────────────────────────────
+    let fy2 = py + pipe_h + qh + 48i32;
+    svg.push_str(&format!(
+        r#"<text x="{}" y="{fy2}" class="dim" text-anchor="middle">generated by sync_engine::codegen::generate_architecture_svg  ·  do not edit</text>
+</svg>"#,
+        w / 2
+    ));
+
+    // ── Wrap in Markdown ──────────────────────────────────────────────────
+    let md = format!(
+        "# {job_name} — architecture\n\n\
+         > Auto-generated by `build.rs`. Do not edit — regenerated on every build.\n\n\
+         {svg}\n\n\
+         ## Pattern: {pattern_label}\n\n\
+         | Phase | Steps |\n\
+         |-------|-------|\n\
+         | pre\\_job | build resources (postgres pool, oauth2, http client) · declare slots/queues |\n\
+         | main\\_job | date\\_window iterator → retry → fetch → transform → {sink_label} |\n\
+         | post\\_job | log\\_summary · raw\\_sql · drain\\_queue · custom hook |\n\
+         | scheduler | cron `{cron}` · mutex-skip · pipeline-scope slots survive ticks |\n\
+         \n\
+         ## Source records\n\n\
+         | Source (`{api_name}`) | Transform rule | Sink (`{db_name}`) |\n\
+         |---|---|---|\n\
+         {rule_rows}\n",
+        rule_rows = mapping_rules.iter()
+            .map(|(f, r)| format!("| `{f}` | `{r}` | `{f}` |"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    fs::write(out_path, &md)
+        .unwrap_or_else(|e| panic!("Cannot write {}: {e}", out_path.display()));
+    println!("cargo:warning=Generated {}", out_path.display());
+}
