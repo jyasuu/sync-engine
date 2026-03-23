@@ -13,6 +13,7 @@
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde::Deserialize;
+#[cfg(feature = "postgres")]
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,10 +28,11 @@ use crate::context::{Connections, JobContext};
 use crate::registry::TypeRegistry;
 use crate::runner::{MainJobRunner, WindowConfig};
 use crate::slot::SlotScope;
+use crate::step::StepRunner;
+use crate::step::Step;
+#[cfg(feature = "postgres")]
 use crate::step::consumer::CommitMode;
 use crate::step::control::{DrainQueueStep, LogSummaryStep, RawSqlStep, SleepStep};
-use crate::step::Step;
-use crate::step::StepRunner;
 
 // ── Re-exports for backwards compat ───────────────────────────────────────
 pub use crate::context::Connections as StandardConnections;
@@ -39,23 +41,23 @@ pub use crate::context::Connections as StandardConnections;
 
 #[derive(Debug, Deserialize)]
 pub struct PipelineConfig {
-    pub job: Option<JobMeta>,
+    pub job:       Option<JobMeta>,
     #[serde(default)]
     pub resources: HashMap<String, ResourceDef>,
     #[serde(default)]
-    pub slots: HashMap<String, SlotDef>,
+    pub slots:     HashMap<String, SlotDef>,
     #[serde(default)]
-    pub queues: HashMap<String, QueueDef>,
-    pub pre_job: PreJobConfig,
-    pub main_job: MainJobConfig,
-    pub post_job: PostJobConfig,
+    pub queues:    HashMap<String, QueueDef>,
+    pub pre_job:   PreJobConfig,
+    pub main_job:  MainJobConfig,
+    pub post_job:  PostJobConfig,
 }
 
 // ── [job] ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct JobMeta {
-    pub name: Option<String>,
+    pub name:      Option<String>,
     pub scheduler: Option<SchedulerConfig>,
 }
 
@@ -71,70 +73,53 @@ pub struct SchedulerConfig {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResourceDef {
+    #[cfg(feature = "postgres")]
     Postgres {
-        url: ConfigValue,
+        url:             ConfigValue,
         #[serde(default = "default_max_conn")]
         max_connections: u32,
     },
     Oauth2 {
-        token_url: ConfigValue,
-        client_id: ConfigValue,
+        token_url:     ConfigValue,
+        client_id:     ConfigValue,
         client_secret: ConfigValue,
     },
     HttpClient {
         #[serde(default = "default_timeout")]
-        timeout_secs: u64,
+        timeout_secs:   u64,
         #[serde(default = "default_keepalive")]
         keepalive_secs: u64,
     },
     HttpService {
-        /// Name of the http_client resource to use
-        http: String,
-        /// Name of the oauth2 resource to use
-        auth: String,
-        endpoint: ConfigValue,
+        http:        String,
+        auth:        String,
+        endpoint:    ConfigValue,
         #[serde(default)]
-        realm_type: Option<ConfigValue>,
-        /// Query param name for the window start date (default: "start_time")
+        realm_type:  Option<ConfigValue>,
         #[serde(default = "default_start_param")]
         start_param: String,
-        /// Query param name for the window end date (default: "end_time")
         #[serde(default = "default_end_param")]
-        end_param: String,
-        /// strftime format for date params (default: "%Y%m%d")
+        end_param:   String,
         #[serde(default = "default_date_fmt")]
         date_format: String,
-        /// Additional static query params as key=value pairs
         #[serde(default)]
         extra_params: Vec<ExtraParam>,
     },
 }
 
-fn default_start_param() -> String {
-    "start_time".into()
-}
-fn default_end_param() -> String {
-    "end_time".into()
-}
-fn default_date_fmt() -> String {
-    "%Y%m%d".into()
-}
+fn default_start_param() -> String { "start_time".into() }
+fn default_end_param()   -> String { "end_time".into() }
+fn default_date_fmt()    -> String { "%Y%m%d".into() }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ExtraParam {
-    pub key: String,
+    pub key:   String,
     pub value: ConfigValue,
 }
 
-fn default_max_conn() -> u32 {
-    5
-}
-fn default_timeout() -> u64 {
-    620
-}
-fn default_keepalive() -> u64 {
-    30
-}
+fn default_max_conn()  -> u32 { 5 }
+fn default_timeout()   -> u64 { 620 }
+fn default_keepalive() -> u64 { 30 }
 
 // ── [slots] ───────────────────────────────────────────────────────────────
 
@@ -143,22 +128,18 @@ pub struct SlotDef {
     /// Schema.toml record name — for documentation only at runtime.
     #[serde(rename = "type")]
     pub record_type: Option<String>,
-    pub scope: SlotScopeStr,
+    pub scope:       SlotScopeStr,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SlotScopeStr {
-    Window,
-    Job,
-    Pipeline,
-}
+pub enum SlotScopeStr { Window, Job, Pipeline }
 
 impl From<&SlotScopeStr> for SlotScope {
     fn from(s: &SlotScopeStr) -> Self {
         match s {
-            SlotScopeStr::Window => SlotScope::Window,
-            SlotScopeStr::Job => SlotScope::Job,
+            SlotScopeStr::Window   => SlotScope::Window,
+            SlotScopeStr::Job      => SlotScope::Job,
             SlotScopeStr::Pipeline => SlotScope::Pipeline,
         }
     }
@@ -174,14 +155,12 @@ pub enum QueueDef {
         capacity: usize,
     },
     Rabbitmq {
-        url: ConfigValue,
-        exchange: ConfigValue,
+        url:         ConfigValue,
+        exchange:    ConfigValue,
         routing_key: ConfigValue,
     },
 }
-fn default_queue_cap() -> usize {
-    256
-}
+fn default_queue_cap() -> usize { 256 }
 
 // ── [pre_job] ─────────────────────────────────────────────────────────────
 
@@ -193,65 +172,56 @@ pub struct PreJobConfig {
     #[serde(default)]
     pub steps: Vec<PreStepConfig>,
 }
-fn default_true() -> bool {
-    true
-}
+fn default_true() -> bool { true }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PreStepConfig {
     SpawnConsumer {
-        queue: String,
-        model: String,
+        queue:       String,
+        model:       String,
         commit_mode: CommitModeStr,
-        accum_slot: Option<String>,
+        accum_slot:  Option<String>,
     },
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
-pub enum CommitModeStr {
-    PerBatch,
-    DrainInPostJob,
-}
+pub enum CommitModeStr { PerBatch, DrainInPostJob }
 
 // ── [main_job] ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct MainJobConfig {
-    pub iterator: IteratorConfig,
-    pub retry: RetryConfig,
+    pub iterator:           IteratorConfig,
+    pub retry:              RetryConfig,
     #[serde(default)]
-    pub retry_steps: Vec<MainStepConfig>,
+    pub retry_steps:        Vec<MainStepConfig>,
     #[serde(default)]
-    pub post_window_steps: Vec<MainStepConfig>,
+    pub post_window_steps:  Vec<MainStepConfig>,
     #[serde(default)]
-    pub post_loop_steps: Vec<MainStepConfig>,
+    pub post_loop_steps:    Vec<MainStepConfig>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct IteratorConfig {
     #[serde(rename = "type")]
-    pub iter_type: String,
+    pub iter_type:      String,
     pub start_interval: ConfigValue,
-    pub end_interval: ConfigValue,
+    pub end_interval:   ConfigValue,
     pub interval_limit: ConfigValue,
-    pub sleep_secs: ConfigValue,
+    pub sleep_secs:     ConfigValue,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct RetryConfig {
     #[serde(default = "default_attempts")]
-    pub max_attempts: usize,
+    pub max_attempts:  usize,
     #[serde(default = "default_backoff")]
-    pub backoff_secs: u64,
+    pub backoff_secs:  u64,
 }
-fn default_attempts() -> usize {
-    5
-}
-fn default_backoff() -> u64 {
-    2
-}
+fn default_attempts() -> usize { 5 }
+fn default_backoff()  -> u64   { 2 }
 
 /// A step entry in [[main_job.retry_steps]] or [[main_job.post_loop_steps]].
 /// The `type` field drives dispatch; all other fields are passed as `params`.
@@ -260,25 +230,25 @@ pub struct MainStepConfig {
     #[serde(rename = "type")]
     pub step_type: String,
     /// The envelope type name for type="fetch" (e.g. "ApiUserResponse")
-    pub envelope: Option<String>,
+    pub envelope:  Option<String>,
     /// The transform type name for type="transform" (e.g. "UserTransform")
     pub transform: Option<String>,
     /// The model type name for type="tx_upsert" (e.g. "DbUser")
-    pub model: Option<String>,
+    pub model:     Option<String>,
     #[serde(default)]
-    pub reads: Option<String>,
+    pub reads:     Option<String>,
     #[serde(default)]
-    pub writes: Option<String>,
+    pub writes:    Option<String>,
     #[serde(default)]
-    pub append: bool,
+    pub append:    bool,
     /// For type="sleep"
-    pub secs: Option<ConfigValue>,
+    pub secs:      Option<ConfigValue>,
     /// For type="raw_sql"
-    pub sql: Option<ConfigValue>,
+    pub sql:       Option<ConfigValue>,
     #[serde(default)]
     pub skip_if_empty: bool,
     /// For type="send_to_queue"
-    pub queue: Option<String>,
+    pub queue:     Option<String>,
 }
 
 // ── [post_job] ────────────────────────────────────────────────────────────
@@ -294,7 +264,7 @@ pub struct PostJobConfig {
 pub enum PostStepConfig {
     LogSummary,
     RawSql {
-        sql: ConfigValue,
+        sql:           ConfigValue,
         #[serde(default)]
         skip_if_empty: bool,
     },
@@ -310,10 +280,10 @@ pub enum PostStepConfig {
 
 /// Resolved at startup from [resources].
 pub struct BuiltResources {
-    pub db: Option<sqlx::PgPool>,
-    pub http: Option<Client>,
-    pub auth: Option<Arc<OAuth2Auth>>,
-    pub endpoint: String,
+    pub db:          Option<sqlx::PgPool>,
+    pub http:        Option<Client>,
+    pub auth:        Option<Arc<OAuth2Auth>>,
+    pub endpoint:    String,
     pub extra_query: Vec<(String, String)>,
 }
 
@@ -330,26 +300,15 @@ pub fn validate(cfg: &PipelineConfig, registry: &TypeRegistry) -> Result<()> {
         cfg.slots.keys().map(|s| s.as_str()).collect();
     let queue_names: std::collections::HashSet<&str> =
         cfg.queues.keys().map(|s| s.as_str()).collect();
-    let all_channels: std::collections::HashSet<&str> = slot_names
-        .iter()
-        .chain(queue_names.iter())
-        .copied()
-        .collect();
+    let all_channels: std::collections::HashSet<&str> =
+        slot_names.iter().chain(queue_names.iter()).copied().collect();
 
     // Built-in slot names that are always available
     let builtin: std::collections::HashSet<&str> = [
-        "summary.windows_processed",
-        "summary.error_count",
-        "summary.total_fetched",
-        "summary.total_upserted",
-        "summary.total_skipped",
-        "window.fetched",
-        "window.upserted",
-        "window.skipped",
-    ]
-    .iter()
-    .copied()
-    .collect();
+        "summary.windows_processed", "summary.error_count",
+        "summary.total_fetched", "summary.total_upserted", "summary.total_skipped",
+        "window.fetched", "window.upserted", "window.skipped",
+    ].iter().copied().collect();
 
     let check_slot = |name: &str, context: &str, errors: &mut Vec<String>| {
         if !all_channels.contains(name) && !builtin.contains(name) {
@@ -368,10 +327,7 @@ pub fn validate(cfg: &PipelineConfig, registry: &TypeRegistry) -> Result<()> {
     }
 
     // Validate all step lists
-    let all_steps = cfg
-        .main_job
-        .retry_steps
-        .iter()
+    let all_steps = cfg.main_job.retry_steps.iter()
         .chain(cfg.main_job.post_window_steps.iter())
         .chain(cfg.main_job.post_loop_steps.iter());
 
@@ -404,6 +360,7 @@ pub fn validate(cfg: &PipelineConfig, registry: &TypeRegistry) -> Result<()> {
                 if let Some(ref w) = step.writes { check_slot(w, &ctx, &mut errors); }
             }
             "tx_upsert" => {
+                #[cfg(feature = "postgres")]
                 match &step.model {
                     None => errors.push(format!("{ctx}: missing `model` field")),
                     Some(m) => if !registry.has_model(m) {
@@ -412,9 +369,12 @@ pub fn validate(cfg: &PipelineConfig, registry: &TypeRegistry) -> Result<()> {
                         ));
                     }
                 }
+                #[cfg(not(feature = "postgres"))]
+                errors.push(format!("{ctx}: tx_upsert requires feature \"postgres\""));
                 if let Some(ref r) = step.reads { check_slot(r, &ctx, &mut errors); }
             }
             "send_to_queue" => {
+                #[cfg(feature = "postgres")]
                 match &step.model {
                     None => errors.push(format!("{ctx}: missing `model` field — needed for typed queue send")),
                     Some(m) => if !registry.has_queue_send(m) {
@@ -473,9 +433,7 @@ pub fn validate(cfg: &PipelineConfig, registry: &TypeRegistry) -> Result<()> {
 // ── build_context ─────────────────────────────────────────────────────────
 
 pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
-    let job_name = cfg
-        .job
-        .as_ref()
+    let job_name = cfg.job.as_ref()
         .and_then(|j| j.name.as_deref())
         .unwrap_or("unnamed")
         .to_owned();
@@ -484,16 +442,13 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
     // Pass 1: http_client (no deps)
     let mut http_clients: HashMap<String, Client> = HashMap::new();
     let mut auth_clients: HashMap<String, Arc<OAuth2Auth>> = HashMap::new();
+    #[cfg(feature = "postgres")]
     let mut db_pools: HashMap<String, sqlx::PgPool> = HashMap::new();
-    let mut endpoint = String::new();
+    let mut endpoint      = String::new();
     let mut extra_query: Vec<(String, String)> = Vec::new();
 
     for (name, def) in &cfg.resources {
-        if let ResourceDef::HttpClient {
-            timeout_secs,
-            keepalive_secs,
-        } = def
-        {
+        if let ResourceDef::HttpClient { timeout_secs, keepalive_secs } = def {
             info!("resource[{}]: building http_client", name);
             let client = Client::builder()
                 .timeout(Duration::from_secs(*timeout_secs))
@@ -504,40 +459,26 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
         }
     }
 
-    // Pass 2: oauth2 (needs http)
+    // Pass 2: oauth2
     for (name, def) in &cfg.resources {
-        if let ResourceDef::Oauth2 {
-            token_url,
-            client_id,
-            client_secret,
-        } = def
-        {
-            // Use the first available http client
-            let http = http_clients
-                .values()
-                .next()
+        if let ResourceDef::Oauth2 { token_url, client_id, client_secret } = def {
+            let http = http_clients.values().next()
                 .cloned()
                 .unwrap_or_else(|| Client::new());
             info!("resource[{}]: building oauth2 client", name);
-            auth_clients.insert(
-                name.clone(),
-                Arc::new(OAuth2Auth::new(
-                    http,
-                    token_url.resolve()?,
-                    client_id.resolve()?,
-                    client_secret.resolve()?,
-                )),
-            );
+            auth_clients.insert(name.clone(), Arc::new(OAuth2Auth::new(
+                http,
+                token_url.resolve()?,
+                client_id.resolve()?,
+                client_secret.resolve()?,
+            )));
         }
     }
 
-    // Pass 3: postgres
+    // Pass 3: postgres (only when feature enabled)
+    #[cfg(feature = "postgres")]
     for (name, def) in &cfg.resources {
-        if let ResourceDef::Postgres {
-            url,
-            max_connections,
-        } = def
-        {
+        if let ResourceDef::Postgres { url, max_connections } = def {
             info!("resource[{}]: connecting to postgres", name);
             let pool = PgPoolOptions::new()
                 .max_connections(*max_connections)
@@ -548,78 +489,55 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
         }
     }
 
-    // Pass 4: http_service — endpoint, date params, extra static query params
+    // Pass 4: http_service
     let mut start_param = "start_time".to_owned();
-    let mut end_param = "end_time".to_owned();
+    let mut end_param   = "end_time".to_owned();
     let mut date_format = "%Y%m%d".to_owned();
 
     for (_name, def) in &cfg.resources {
         if let ResourceDef::HttpService {
-            endpoint: ep,
-            realm_type,
-            start_param: sp,
-            end_param: ep2,
-            date_format: df,
-            extra_params,
-            ..
-        } = def
-        {
-            endpoint = ep.resolve()?;
+            endpoint: ep, realm_type,
+            start_param: sp, end_param: ep2, date_format: df,
+            extra_params, ..
+        } = def {
+            endpoint    = ep.resolve()?;
             start_param = sp.clone();
-            end_param = ep2.clone();
+            end_param   = ep2.clone();
             date_format = df.clone();
             if let Some(rt) = realm_type {
                 let v = rt.resolve().unwrap_or_default();
-                if !v.is_empty() {
-                    extra_query.push(("realm_type".to_owned(), v));
-                }
+                if !v.is_empty() { extra_query.push(("realm_type".to_owned(), v)); }
             }
             for p in extra_params {
                 let v = p.value.resolve().unwrap_or_default();
-                if !v.is_empty() {
-                    extra_query.push((p.key.clone(), v));
-                }
+                if !v.is_empty() { extra_query.push((p.key.clone(), v)); }
             }
         }
     }
 
-    let db = db_pools
-        .into_values()
-        .next()
-        .ok_or_else(|| anyhow!("No postgres resource defined"))?;
-    let auth = auth_clients
-        .into_values()
-        .next()
+    #[cfg(feature = "postgres")]
+    let db = db_pools.into_values().next()
+        .ok_or_else(|| anyhow!("No postgres resource defined — add [resources.pg] or remove the postgres feature requirement"))?;
+
+    let auth = auth_clients.into_values().next()
         .ok_or_else(|| anyhow!("No oauth2 resource defined"))?;
-    let http = http_clients
-        .into_values()
-        .next()
+    let http = http_clients.into_values().next()
         .ok_or_else(|| anyhow!("No http_client resource defined"))?;
 
     let connections = Connections {
+        #[cfg(feature = "postgres")]
         db,
-        auth,
-        http,
-        endpoint,
-        extra_query,
-        start_param,
-        end_param,
-        date_format,
+        auth, http, endpoint, extra_query,
+        start_param, end_param, date_format,
     };
 
     // ── Config map ────────────────────────────────────────────────────────
     let iter = &cfg.main_job.iterator;
     let mut config = HashMap::new();
-    config.insert(
-        "iterator.start_interval".into(),
-        iter.start_interval.resolve()?,
-    );
-    config.insert("iterator.end_interval".into(), iter.end_interval.resolve()?);
-    config.insert(
-        "iterator.interval_limit".into(),
-        iter.interval_limit.resolve()?,
-    );
-    config.insert("iterator.sleep_secs".into(), iter.sleep_secs.resolve()?);
+    config.insert("iterator.start_interval".into(), iter.start_interval.resolve()?);
+    config.insert("iterator.end_interval".into(),   iter.end_interval.resolve()?);
+    config.insert("iterator.interval_limit".into(), iter.interval_limit.resolve()?);
+    config.insert("iterator.sleep_secs".into(),     iter.sleep_secs.resolve()?);
 
     let ctx = Arc::new(JobContext::new(connections, config, job_name));
 
@@ -627,13 +545,13 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
     {
         let mut slots = ctx.slots.write().await;
         slots.declare("summary.windows_processed", SlotScope::Job);
-        slots.declare("summary.error_count", SlotScope::Job);
-        slots.declare("summary.total_fetched", SlotScope::Job);
-        slots.declare("summary.total_upserted", SlotScope::Job);
-        slots.declare("summary.total_skipped", SlotScope::Job);
-        slots.declare("window.fetched", SlotScope::Window);
-        slots.declare("window.upserted", SlotScope::Window);
-        slots.declare("window.skipped", SlotScope::Window);
+        slots.declare("summary.error_count",       SlotScope::Job);
+        slots.declare("summary.total_fetched",     SlotScope::Job);
+        slots.declare("summary.total_upserted",    SlotScope::Job);
+        slots.declare("summary.total_skipped",     SlotScope::Job);
+        slots.declare("window.fetched",            SlotScope::Window);
+        slots.declare("window.upserted",           SlotScope::Window);
+        slots.declare("window.skipped",            SlotScope::Window);
 
         // User-declared slots from [slots]
         for (key, def) in &cfg.slots {
@@ -648,28 +566,21 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
                 ctx.register_queue(name, *capacity).await;
                 info!("queue[{}]: tokio mpsc, capacity={}", name, capacity);
             }
-            QueueDef::Rabbitmq {
-                url,
-                exchange,
-                routing_key,
-            } => {
+            QueueDef::Rabbitmq { url, exchange, routing_key } => {
                 let url_str = url.resolve()?;
-                let exchange_str = exchange.resolve()?;
+                let exchange_str    = exchange.resolve()?;
                 let routing_key_str = routing_key.resolve()?;
-                info!(
-                    "queue[{}]: connecting to RabbitMQ exchange={}",
-                    name, exchange_str
-                );
+                info!("queue[{}]: connecting to RabbitMQ exchange={}", name, exchange_str);
                 // Store the config in the context's queue map under a special key
                 // so SpawnConsumerStep and SendToQueueStep can retrieve it.
                 // We use a tokio channel as the in-process bridge; the producer
                 // step serializes and publishes via lapin, consumer subscribes.
                 use crate::transport::rabbitmq::{RabbitmqConfig, RabbitmqQueue};
                 let rmq_cfg = RabbitmqConfig {
-                    url: url_str,
-                    exchange: exchange_str,
+                    url:         url_str,
+                    exchange:    exchange_str,
                     routing_key: routing_key_str,
-                    queue_name: None,
+                    queue_name:  None,
                 };
                 // Connect producer; consumer is connected when spawn_consumer runs.
                 match RabbitmqQueue::connect(rmq_cfg).await {
@@ -685,8 +596,7 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
                         ctx.slot_write(
                             &format!("__rmq_queue_{name}"),
                             std::sync::Arc::new(tokio::sync::Mutex::new(q)),
-                        )
-                        .await?;
+                        ).await?;
                         // Also register a tokio bridge channel for in-process coordination
                         ctx.register_queue(name, 256).await;
                         info!("queue[{}]: RabbitMQ connected", name);
@@ -706,60 +616,53 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
 pub fn build_window_cfg(cfg: &PipelineConfig) -> Result<WindowConfig> {
     let iter = &cfg.main_job.iterator;
     Ok(WindowConfig {
-        start_interval: iter.start_interval.resolve_as::<i64>()?,
-        end_interval: iter.end_interval.resolve_as::<i64>()?,
-        interval_limit: iter.interval_limit.resolve_as::<i64>()?,
-        sleep_secs: iter.sleep_secs.resolve_as::<u64>()?,
-        max_attempts: cfg.main_job.retry.max_attempts,
+        start_interval:    iter.start_interval.resolve_as::<i64>()?,
+        end_interval:      iter.end_interval.resolve_as::<i64>()?,
+        interval_limit:    iter.interval_limit.resolve_as::<i64>()?,
+        sleep_secs:        iter.sleep_secs.resolve_as::<u64>()?,
+        max_attempts:      cfg.main_job.retry.max_attempts,
         base_backoff_secs: cfg.main_job.retry.backoff_secs,
     })
 }
 
 /// Build typed steps from a slice of MainStepConfig using the TypeRegistry.
-pub fn build_steps(steps: &[MainStepConfig], registry: &TypeRegistry) -> Result<StepRunner> {
+pub fn build_steps(
+    steps: &[MainStepConfig],
+    registry: &TypeRegistry,
+) -> Result<StepRunner> {
     let mut runner = StepRunner::new();
     for s in steps {
         let mut params = HashMap::new();
-        if let Some(ref r) = s.reads {
-            params.insert("reads".into(), r.clone());
-        }
-        if let Some(ref w) = s.writes {
-            params.insert("writes".into(), w.clone());
-        }
-        if s.append {
-            params.insert("append".into(), "true".into());
-        }
+        if let Some(ref r) = s.reads  { params.insert("reads".into(),  r.clone()); }
+        if let Some(ref w) = s.writes { params.insert("writes".into(), w.clone()); }
+        if s.append { params.insert("append".into(), "true".into()); }
 
         match s.step_type.as_str() {
             "fetch" => {
-                let env = s
-                    .envelope
-                    .as_deref()
+                let env = s.envelope.as_deref()
                     .ok_or_else(|| anyhow!("fetch step missing `envelope` field"))?;
                 runner.push_boxed(registry.build_fetch(env, &params)?);
             }
             "transform" => {
-                let xfm = s
-                    .transform
-                    .as_deref()
+                let xfm = s.transform.as_deref()
                     .ok_or_else(|| anyhow!("transform step missing `transform` field"))?;
                 runner.push_boxed(registry.build_transform(xfm, &params)?);
             }
             "tx_upsert" => {
-                let model = s
-                    .model
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("tx_upsert step missing `model` field"))?;
-                runner.push_boxed(registry.build_model_sink(model, &params)?);
+                #[cfg(feature = "postgres")]
+                {
+                    let model = s.model.as_deref()
+                        .ok_or_else(|| anyhow!("tx_upsert step missing `model` field"))?;
+                    runner.push_boxed(registry.build_model_sink(model, &params)?);
+                }
+                #[cfg(not(feature = "postgres"))]
+                return Err(anyhow!("tx_upsert requires feature \"postgres\" — add it to Cargo.toml"));
             }
             "send_to_queue" => {
-                let model = s.model.as_deref().ok_or_else(|| {
-                    anyhow!("send_to_queue step missing `model` field — set model = \"DbUser\"")
-                })?;
+                let model = s.model.as_deref()
+                    .ok_or_else(|| anyhow!("send_to_queue step missing `model` field"))?;
                 let reads = s.reads.clone().unwrap_or_else(|| "db_rows".into());
-                let queue = s
-                    .queue
-                    .clone()
+                let queue = s.queue.clone()
                     .ok_or_else(|| anyhow!("send_to_queue step missing `queue` field"))?;
                 let mut p = params.clone();
                 p.insert("reads".into(), reads);
@@ -767,18 +670,14 @@ pub fn build_steps(steps: &[MainStepConfig], registry: &TypeRegistry) -> Result<
                 runner.push_boxed(registry.build_queue_send(model, &p)?);
             }
             "sleep" => {
-                let secs = s
-                    .secs
-                    .as_ref()
+                let secs = s.secs.as_ref()
                     .map(|v| v.resolve_as::<u64>())
                     .transpose()?
                     .unwrap_or(60);
                 runner.push(SleepStep::new(secs));
             }
             "raw_sql" => {
-                let sql = s
-                    .sql
-                    .as_ref()
+                let sql = s.sql.as_ref()
                     .map(|v| v.resolve())
                     .transpose()?
                     .unwrap_or_default();
@@ -791,6 +690,8 @@ pub fn build_steps(steps: &[MainStepConfig], registry: &TypeRegistry) -> Result<
     }
     Ok(runner)
 }
+
+
 
 // ── PostJobExecutor ───────────────────────────────────────────────────────
 
@@ -838,13 +739,12 @@ pub async fn run_post_job(
 /// }
 /// ```
 pub async fn run(path: &str, registry: TypeRegistry) -> Result<()> {
-    let raw = std::fs::read_to_string(path).with_context(|| format!("Cannot read {path}"))?;
-    let cfg: PipelineConfig =
-        toml::from_str(&raw).with_context(|| format!("Cannot parse {path}"))?;
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("Cannot read {path}"))?;
+    let cfg: PipelineConfig = toml::from_str(&raw)
+        .with_context(|| format!("Cannot parse {path}"))?;
 
-    let cron = cfg
-        .job
-        .as_ref()
+    let cron = cfg.job.as_ref()
         .and_then(|j| j.scheduler.as_ref())
         .map(|s| s.cron.resolve())
         .transpose()?
@@ -863,26 +763,21 @@ pub async fn run(path: &str, registry: TypeRegistry) -> Result<()> {
     let lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
     let mut scheduler = JobScheduler::new().await?;
 
-    scheduler
-        .add(Job::new_async(cron.as_str(), move |_, _| {
-            let cfg = Arc::clone(&cfg);
-            let ctx = Arc::clone(&ctx);
-            let reg = Arc::clone(&reg);
-            let lock = Arc::clone(&lock);
-            Box::pin(async move {
-                let _guard = match lock.try_lock() {
-                    Ok(g) => g,
-                    Err(_) => {
-                        tracing::debug!("Previous job running — skipping");
-                        return;
-                    }
-                };
-                if let Err(e) = run_one_tick(&cfg, &ctx, &reg).await {
-                    tracing::error!(error = %e, "Job tick failed");
-                }
-            })
-        })?)
-        .await?;
+    scheduler.add(Job::new_async(cron.as_str(), move |_, _| {
+        let cfg  = Arc::clone(&cfg);
+        let ctx  = Arc::clone(&ctx);
+        let reg  = Arc::clone(&reg);
+        let lock = Arc::clone(&lock);
+        Box::pin(async move {
+            let _guard = match lock.try_lock() {
+                Ok(g)  => g,
+                Err(_) => { tracing::debug!("Previous job running — skipping"); return; }
+            };
+            if let Err(e) = run_one_tick(&cfg, &ctx, &reg).await {
+                tracing::error!(error = %e, "Job tick failed");
+            }
+        })
+    })?).await?;
 
     scheduler.start().await?;
     info!("Scheduled ({cron}). Ctrl-C to exit.");
@@ -904,36 +799,36 @@ async fn run_one_tick(
     // Pre-job: spawn consumers if configured
     for step in &cfg.pre_job.steps {
         match step {
-            PreStepConfig::SpawnConsumer {
-                queue,
-                model,
-                commit_mode,
-                accum_slot,
-            } => {
-                let mode = match commit_mode {
-                    CommitModeStr::PerBatch => CommitMode::PerBatch,
-                    CommitModeStr::DrainInPostJob => CommitMode::DrainInPostJob,
-                };
-                let consumer_step = reg.build_consumer(model, queue, mode, accum_slot.clone())?;
-                consumer_step
-                    .run(ctx)
-                    .await
-                    .with_context(|| format!("spawn_consumer for queue \"{queue}\" failed"))?;
+            PreStepConfig::SpawnConsumer { queue, model, commit_mode, accum_slot } => {
+                #[cfg(feature = "postgres")]
+                {
+                    let mode = match commit_mode {
+                        CommitModeStr::PerBatch       => CommitMode::PerBatch,
+                        CommitModeStr::DrainInPostJob => CommitMode::DrainInPostJob,
+                    };
+                    let consumer_step = reg.build_consumer(
+                        model, queue, mode, accum_slot.clone(),
+                    )?;
+                    consumer_step.run(ctx).await
+                        .with_context(|| format!("spawn_consumer for queue \"{queue}\" failed"))?;
+                }
+                #[cfg(not(feature = "postgres"))]
+                tracing::warn!(queue = %queue, model = %model, "spawn_consumer requires feature \"postgres\" — skipped");
             }
         }
     }
 
     // Main job
-    let retry_steps = build_steps(&cfg.main_job.retry_steps, reg)?;
-    let post_window = build_steps(&cfg.main_job.post_window_steps, reg)?;
-    let post_loop = build_steps(&cfg.main_job.post_loop_steps, reg)?;
-    let window_cfg = build_window_cfg(cfg)?;
+    let retry_steps    = build_steps(&cfg.main_job.retry_steps,       reg)?;
+    let post_window    = build_steps(&cfg.main_job.post_window_steps,  reg)?;
+    let post_loop      = build_steps(&cfg.main_job.post_loop_steps,    reg)?;
+    let window_cfg     = build_window_cfg(cfg)?;
 
     let mut runner = MainJobRunner {
         window_cfg,
         retry_steps,
         post_window_steps: post_window,
-        post_loop_steps: post_loop,
+        post_loop_steps:   post_loop,
     };
 
     let _summary = runner.run(ctx).await?;

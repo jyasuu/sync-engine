@@ -37,7 +37,7 @@ mod slot_tests {
         m.clear_scope(SlotScope::Window).await;
 
         assert!(!m.is_set("w"), "window slot should be cleared");
-        assert!(m.is_set("j"), "job slot should survive");
+        assert!(m.is_set("j"),  "job slot should survive");
         let j: u32 = m.read("j").await.unwrap();
         assert_eq!(j, 2);
     }
@@ -53,7 +53,7 @@ mod slot_tests {
         m.clear_scope(SlotScope::Job).await;
 
         assert!(!m.is_set("j"), "job slot should be cleared");
-        assert!(m.is_set("p"), "pipeline slot should survive");
+        assert!(m.is_set("p"),  "pipeline slot should survive");
     }
 
     #[tokio::test]
@@ -206,11 +206,7 @@ mod codegen_rule_tests {
     // added specifically for tests. See codegen.rs.
     #[test]
     fn copy_rule_generates_field_access() {
-        let rd = RuleDef {
-            field: "name".into(),
-            source: None,
-            rule: "copy".into(),
-        };
+        let rd = RuleDef { field: "name".into(), source: None, rule: "copy".into() };
         let src = rd.source.as_deref().unwrap_or(&rd.field);
         let expr = gen_rule_expr_pub(&rd.field, src, &rd.rule);
         assert_eq!(expr, "u.name");
@@ -219,9 +215,9 @@ mod codegen_rule_tests {
     #[test]
     fn copy_rule_with_different_source() {
         let rd = RuleDef {
-            field: "sso_acct".into(),
+            field:  "sso_acct".into(),
             source: Some("ssoAcct".into()),
-            rule: "copy".into(),
+            rule:   "copy".into(),
         };
         let src = rd.source.as_deref().unwrap_or(&rd.field);
         let expr = gen_rule_expr_pub(&rd.field, src, &rd.rule);
@@ -335,15 +331,9 @@ mod http_service_config_tests {
             endpoint = "https://api.example.com"
         "#;
         let def: ResourceDef = toml::from_str(toml).unwrap();
-        if let ResourceDef::HttpService {
-            start_param,
-            end_param,
-            date_format,
-            ..
-        } = def
-        {
+        if let ResourceDef::HttpService { start_param, end_param, date_format, .. } = def {
             assert_eq!(start_param, "start_time");
-            assert_eq!(end_param, "end_time");
+            assert_eq!(end_param,   "end_time");
             assert_eq!(date_format, "%Y%m%d");
         } else {
             panic!("expected HttpService variant");
@@ -362,15 +352,9 @@ mod http_service_config_tests {
             date_format = "%Y-%m-%d"
         "#;
         let def: ResourceDef = toml::from_str(toml).unwrap();
-        if let ResourceDef::HttpService {
-            start_param,
-            end_param,
-            date_format,
-            ..
-        } = def
-        {
+        if let ResourceDef::HttpService { start_param, end_param, date_format, .. } = def {
             assert_eq!(start_param, "from_date");
-            assert_eq!(end_param, "to_date");
+            assert_eq!(end_param,   "to_date");
             assert_eq!(date_format, "%Y-%m-%d");
         } else {
             panic!("expected HttpService variant");
@@ -429,9 +413,7 @@ mod runner_behavior_tests {
         // 28-day range, 7-day windows → exactly 4 windows
         let mut iter = DateWindowIter::new(28, 0, 7).without_sleep();
         let mut count = 0;
-        while iter.next_window().await.is_some() {
-            count += 1;
-        }
+        while iter.next_window().await.is_some() { count += 1; }
         assert_eq!(count, 4);
     }
 }
@@ -442,8 +424,7 @@ mod validation_extra_tests {
     use crate::registry::TypeRegistry;
 
     fn minimal_cfg_with_iter_type(t: &str) -> PipelineConfig {
-        let raw = format!(
-            r#"
+        let raw = format!(r#"
 [pre_job]
 init_resources = true
 
@@ -459,8 +440,7 @@ max_attempts = 3
 backoff_secs = 1
 
 [post_job]
-"#
-        );
+"#);
         toml::from_str(&raw).unwrap()
     }
 
@@ -469,14 +449,8 @@ backoff_secs = 1
         let cfg = minimal_cfg_with_iter_type("offset_page");
         let reg = TypeRegistry::new();
         let err = validate(&cfg, &reg).unwrap_err().to_string();
-        assert!(
-            err.contains("offset_page"),
-            "error should name the bad type"
-        );
-        assert!(
-            err.contains("date_window"),
-            "error should name the valid type"
-        );
+        assert!(err.contains("offset_page"), "error should name the bad type");
+        assert!(err.contains("date_window"), "error should name the valid type");
     }
 
     #[test]
@@ -488,9 +462,6 @@ backoff_secs = 1
             .err()
             .map(|e| e.to_string())
             .unwrap_or_default();
-        assert!(
-            !err_str.contains("not supported"),
-            "valid type should not produce unsupported error"
-        );
+        assert!(!err_str.contains("not supported"), "valid type should not produce unsupported error");
     }
 }

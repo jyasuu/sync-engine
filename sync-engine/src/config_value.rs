@@ -30,7 +30,7 @@ pub enum ConfigValue {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct EnvRef {
-    pub env: String,
+    pub env:     String,
     pub default: Option<String>,
 }
 
@@ -40,15 +40,19 @@ impl ConfigValue {
     pub fn resolve(&self) -> Result<String> {
         match self {
             ConfigValue::Literal(s) => Ok(s.clone()),
-            ConfigValue::Env(r) => match std::env::var(&r.env) {
-                Ok(v) => Ok(v),
-                Err(_) => r.default.clone().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Required env var \"{}\" is not set and has no default",
-                        r.env
-                    )
-                }),
-            },
+            ConfigValue::Env(r)     => {
+                match std::env::var(&r.env) {
+                    Ok(v) => Ok(v),
+                    Err(_) => {
+                        r.default.clone().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Required env var \"{}\" is not set and has no default",
+                                r.env
+                            )
+                        })
+                    }
+                }
+            }
         }
     }
 
@@ -58,8 +62,9 @@ impl ConfigValue {
         T::Err: std::fmt::Display,
     {
         let s = self.resolve()?;
-        s.parse::<T>()
-            .map_err(|e| anyhow::anyhow!("Failed to parse config value \"{s}\": {e}"))
+        s.parse::<T>().map_err(|e| {
+            anyhow::anyhow!("Failed to parse config value \"{s}\": {e}")
+        })
     }
 
     /// Resolve, returning a default T if the value is empty.
@@ -79,12 +84,8 @@ impl ConfigValue {
 
 // Allow ConfigValue where a plain String was expected in older TOML schemas.
 impl From<String> for ConfigValue {
-    fn from(s: String) -> Self {
-        ConfigValue::Literal(s)
-    }
+    fn from(s: String) -> Self { ConfigValue::Literal(s) }
 }
 impl From<&str> for ConfigValue {
-    fn from(s: &str) -> Self {
-        ConfigValue::Literal(s.to_owned())
-    }
+    fn from(s: &str) -> Self { ConfigValue::Literal(s.to_owned()) }
 }

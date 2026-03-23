@@ -15,7 +15,7 @@ pub trait Source: Send + Sync {
 }
 
 pub trait Transform: Send + Sync {
-    type Input: Send;
+    type Input:  Send;
     type Output: Send;
     fn apply(&self, input: Self::Input) -> Result<Self::Output>;
 }

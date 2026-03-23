@@ -8,10 +8,10 @@ pub trait Connections: Send + Sync {}
 #[derive(Debug, Default)]
 pub struct JobSummary {
     pub windows_processed: usize,
-    pub records_fetched: usize,
-    pub records_upserted: usize,
-    pub records_skipped: usize,
-    pub errors: Vec<String>,
+    pub records_fetched:   usize,
+    pub records_upserted:  usize,
+    pub records_skipped:   usize,
+    pub errors:            Vec<String>,
 }
 
 #[async_trait]
@@ -43,7 +43,7 @@ where
 {
     let cx = <J as PreJob>::run(cfg).await?;
     let summary = match <J as MainJob>::run(&cx, cfg).await {
-        Ok(s) => s,
+        Ok(s)  => s,
         Err(e) => {
             tracing::error!(error = %e, "main_job failed");
             let mut s = JobSummary::default();
@@ -59,10 +59,10 @@ where
 
 pub struct DateWindowIter {
     pub cursor: i64,
-    pub end: i64,
-    pub limit: i64,
-    pub sleep: Duration,
-    first: bool,
+    pub end:    i64,
+    pub limit:  i64,
+    pub sleep:  Duration,
+    first:      bool,
 }
 
 impl DateWindowIter {
@@ -114,7 +114,7 @@ where
     let mut delay = Duration::from_secs(2);
     for attempt in 1..=max_attempts {
         match f().await {
-            Ok(v) => return Ok(v),
+            Ok(v)  => return Ok(v),
             Err(e) if attempt == max_attempts => {
                 tracing::error!(attempt, error = %e, "All retries exhausted");
                 return Err(e);

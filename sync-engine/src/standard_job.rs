@@ -26,32 +26,26 @@ use crate::{HasEnvelope, Transform};
 
 /// Exposes the pieces of Connections that StandardJob needs.
 pub trait HasConnections: Send + Sync {
-    fn db_pool(&self) -> &sqlx::PgPool;
-    fn auth(&self) -> &OAuth2Auth;
+    fn db_pool(&self)     -> &sqlx::PgPool;
+    fn auth(&self)        -> &OAuth2Auth;
     fn http_client(&self) -> &reqwest::Client;
-    fn endpoint(&self) -> &str;
+    fn endpoint(&self)    -> &str;
     /// Optional extra static query params (e.g. realm_type).
-    fn extra_query(&self) -> Vec<(String, String)> {
-        vec![]
-    }
+    fn extra_query(&self) -> Vec<(String, String)> { vec![] }
 }
 
 /// Iterator window parameters, typically forwarded from the config struct.
 pub trait HasIteratorCfg: Send + Sync {
-    fn start_interval(&self) -> i64;
-    fn end_interval(&self) -> i64;
-    fn interval_limit(&self) -> i64;
+    fn start_interval(&self)    -> i64;
+    fn end_interval(&self)      -> i64;
+    fn interval_limit(&self)    -> i64;
     fn window_sleep_secs(&self) -> u64;
 }
 
 /// Retry knobs — defaults are 5 attempts / 2 s base delay.
 pub trait HasRetryCfg: Send + Sync {
-    fn max_attempts(&self) -> usize {
-        5
-    }
-    fn base_backoff_secs(&self) -> u64 {
-        2
-    }
+    fn max_attempts(&self)      -> usize { 5 }
+    fn base_backoff_secs(&self) -> u64   { 2 }
 }
 
 // ── StandardJob ───────────────────────────────────────────────────────────
@@ -86,29 +80,27 @@ pub struct StandardJob<Cx, Cfg, Env, DbM, Xfm> {
 
 impl<Cx, Cfg, Env, DbM, Xfm> Default for StandardJob<Cx, Cfg, Env, DbM, Xfm> {
     fn default() -> Self {
-        Self {
-            _phantom: std::marker::PhantomData,
-        }
+        Self { _phantom: std::marker::PhantomData }
     }
 }
 
 #[async_trait]
 impl<Cx, Cfg, Env, DbM, Xfm> MainJob for StandardJob<Cx, Cfg, Env, DbM, Xfm>
 where
-    Cx: HasConnections + crate::job::Connections,
+    Cx:  HasConnections + crate::job::Connections,
     Cfg: HasIteratorCfg + HasRetryCfg + Send + Sync,
     Env: HasEnvelope + Send + 'static,
     Env::Item: Send + 'static,
     Xfm: Transform<Input = Env::Item, Output = DbM> + Default + Send + Sync,
     DbM: UpsertableInTx + Send + Sync + 'static,
 {
-    type Cx = Cx;
+    type Cx  = Cx;
     type Cfg = Cfg;
 
     async fn run(cx: &Cx, cfg: &Cfg) -> Result<JobSummary> {
-        let mut summary = JobSummary::default();
-        let transform = Xfm::default();
-        let writer = TxWriter::<DbM>::new(cx.db_pool().clone());
+        let mut summary   = JobSummary::default();
+        let transform     = Xfm::default();
+        let writer        = TxWriter::<DbM>::new(cx.db_pool().clone());
 
         let mut iter = DateWindowIter::new(
             cfg.start_interval(),
@@ -123,13 +115,11 @@ where
             summary.windows_processed += 1;
             info!(start, end, "Processing window");
 
-            let now = chrono::Utc::now();
+            let now       = chrono::Utc::now();
             let start_str = (now - chrono::Duration::days(start))
-                .format("%Y%m%d")
-                .to_string();
-            let end_str = (now - chrono::Duration::days(end))
-                .format("%Y%m%d")
-                .to_string();
+                .format("%Y%m%d").to_string();
+            let end_str   = (now - chrono::Duration::days(end))
+                .format("%Y%m%d").to_string();
 
             let result = run_window_with_retry::<Cx, Env, DbM, Xfm>(
                 cfg.max_attempts(),
@@ -144,9 +134,9 @@ where
 
             match result {
                 Ok((fetched, upserted, skipped)) => {
-                    summary.records_fetched += fetched;
-                    summary.records_upserted += upserted;
-                    summary.records_skipped += skipped;
+                    summary.records_fetched   += fetched;
+                    summary.records_upserted  += upserted;
+                    summary.records_skipped   += skipped;
                     last_ok = true;
                 }
                 Err(e) => {
@@ -166,15 +156,15 @@ where
 
 async fn run_window_with_retry<Cx, Env, DbM, Xfm>(
     max_attempts: usize,
-    base_delay: Duration,
-    cx: &Cx,
-    transform: &Xfm,
-    writer: &TxWriter<DbM>,
-    start_str: &str,
-    end_str: &str,
+    base_delay:   Duration,
+    cx:           &Cx,
+    transform:    &Xfm,
+    writer:       &TxWriter<DbM>,
+    start_str:    &str,
+    end_str:      &str,
 ) -> Result<(usize, usize, usize)>
 where
-    Cx: HasConnections,
+    Cx:  HasConnections,
     Env: HasEnvelope + Send + 'static,
     Env::Item: Send + 'static,
     Xfm: Transform<Input = Env::Item, Output = DbM>,
@@ -182,8 +172,10 @@ where
 {
     let mut delay = base_delay;
     for attempt in 1..=max_attempts {
-        match fetch_transform_upsert::<Cx, Env, DbM, Xfm>(cx, transform, writer, start_str, end_str)
-            .await
+        match fetch_transform_upsert::<Cx, Env, DbM, Xfm>(
+            cx, transform, writer, start_str, end_str,
+        )
+        .await
         {
             Ok(counts) => return Ok(counts),
             Err(e) if attempt == max_attempts => {
@@ -201,14 +193,14 @@ where
 }
 
 async fn fetch_transform_upsert<Cx, Env, DbM, Xfm>(
-    cx: &Cx,
+    cx:        &Cx,
     transform: &Xfm,
-    writer: &TxWriter<DbM>,
+    writer:    &TxWriter<DbM>,
     start_str: &str,
-    end_str: &str,
+    end_str:   &str,
 ) -> Result<(usize, usize, usize)>
 where
-    Cx: HasConnections,
+    Cx:  HasConnections,
     Env: HasEnvelope + Send + 'static,
     Env::Item: Send + 'static,
     Xfm: Transform<Input = Env::Item, Output = DbM>,
@@ -231,7 +223,7 @@ where
     }
 
     // 3. send
-    let resp = req.send().await.context("HTTP send failed")?;
+    let resp   = req.send().await.context("HTTP send failed")?;
     let status = resp.status();
 
     if status == StatusCode::UNAUTHORIZED {
@@ -239,7 +231,7 @@ where
         anyhow::bail!("401 — token invalidated, will retry");
     }
 
-    let resp = resp.error_for_status().context("API error status")?;
+    let resp  = resp.error_for_status().context("API error status")?;
     let bytes = resp.bytes().await.context("Failed to read body")?;
     info!(bytes = bytes.len(), "Body received");
 
@@ -255,18 +247,15 @@ where
     })?;
 
     let api_items = envelope.into_items();
-    let fetched = api_items.len();
+    let fetched   = api_items.len();
     info!(fetched, "Parse OK");
 
     // 5. transform
     let db_items: Vec<DbM> = api_items
         .into_iter()
         .filter_map(|item| match transform.apply(item) {
-            Ok(d) => Some(d),
-            Err(e) => {
-                warn!(error = %e, "Transform skip");
-                None
-            }
+            Ok(d)  => Some(d),
+            Err(e) => { warn!(error = %e, "Transform skip"); None }
         })
         .collect();
     debug!(mapped = db_items.len(), "Transform done");

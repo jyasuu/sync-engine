@@ -9,17 +9,13 @@ use super::Source;
 
 pub struct ComposedSource<C, A, F> {
     pub chunker: C,
-    pub auth: A,
+    pub auth:    A,
     pub fetcher: F,
 }
 
 impl<C, A, F> ComposedSource<C, A, F> {
     pub fn new(chunker: C, auth: A, fetcher: F) -> Self {
-        Self {
-            chunker,
-            auth,
-            fetcher,
-        }
+        Self { chunker, auth, fetcher }
     }
 }
 

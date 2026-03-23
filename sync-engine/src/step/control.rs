@@ -21,16 +21,12 @@ pub struct SleepStep {
 }
 
 impl SleepStep {
-    pub fn new(secs: u64) -> Self {
-        Self { secs }
-    }
+    pub fn new(secs: u64) -> Self { Self { secs } }
 }
 
 #[async_trait]
 impl Step for SleepStep {
-    fn name(&self) -> &str {
-        "sleep"
-    }
+    fn name(&self) -> &str { "sleep" }
 
     async fn run(&self, _ctx: &JobContext) -> Result<()> {
         if self.secs > 0 {
@@ -50,19 +46,14 @@ pub struct LogSummaryStep;
 
 #[async_trait]
 impl Step for LogSummaryStep {
-    fn name(&self) -> &str {
-        "log_summary"
-    }
+    fn name(&self) -> &str { "log_summary" }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
-        let windows: usize = ctx
-            .slot_read("summary.windows_processed")
-            .await
-            .unwrap_or(0);
-        let errors: usize = ctx.slot_read("summary.error_count").await.unwrap_or(0);
-        let fetched: usize = ctx.slot_read("summary.total_fetched").await.unwrap_or(0);
-        let upserted: usize = ctx.slot_read("summary.total_upserted").await.unwrap_or(0);
-        let skipped: usize = ctx.slot_read("summary.total_skipped").await.unwrap_or(0);
+        let windows:  usize = ctx.slot_read("summary.windows_processed") .await.unwrap_or(0);
+        let errors:   usize = ctx.slot_read("summary.error_count")        .await.unwrap_or(0);
+        let fetched:  usize = ctx.slot_read("summary.total_fetched")      .await.unwrap_or(0);
+        let upserted: usize = ctx.slot_read("summary.total_upserted")     .await.unwrap_or(0);
+        let skipped:  usize = ctx.slot_read("summary.total_skipped")      .await.unwrap_or(0);
 
         info!(
             job = %ctx.job_name,
@@ -80,34 +71,36 @@ impl Step for LogSummaryStep {
 // ── RawSqlStep ────────────────────────────────────────────────────────────
 
 pub struct RawSqlStep {
-    pub sql: String,
-    pub skip_if_empty: bool,
+    pub sql:            String,
+    pub skip_if_empty:  bool,
 }
 
 impl RawSqlStep {
     pub fn new(sql: impl Into<String>, skip_if_empty: bool) -> Self {
-        Self {
-            sql: sql.into(),
-            skip_if_empty,
-        }
+        Self { sql: sql.into(), skip_if_empty }
     }
 }
 
 #[async_trait]
 impl Step for RawSqlStep {
-    fn name(&self) -> &str {
-        "raw_sql"
-    }
+    fn name(&self) -> &str { "raw_sql" }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
         if self.sql.trim().is_empty() && self.skip_if_empty {
             return Ok(());
         }
-        info!("Running post-sync SQL");
-        sqlx::raw_sql(&self.sql)
-            .execute(&ctx.connections.db)
-            .await
-            .context("Raw SQL failed")?;
+        #[cfg(feature = "postgres")]
+        {
+            info!("Running post-sync SQL");
+            sqlx::raw_sql(&self.sql)
+                .execute(&ctx.connections.db)
+                .await
+                .context("Raw SQL failed")?;
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            tracing::warn!(sql = %self.sql, "raw_sql step requires the 'postgres' feature — skipped");
+        }
         Ok(())
     }
 }
@@ -122,17 +115,13 @@ pub struct DrainQueueStep {
 
 impl DrainQueueStep {
     pub fn new(queue: impl Into<String>) -> Self {
-        Self {
-            queue: queue.into(),
-        }
+        Self { queue: queue.into() }
     }
 }
 
 #[async_trait]
 impl Step for DrainQueueStep {
-    fn name(&self) -> &str {
-        "drain_queue"
-    }
+    fn name(&self) -> &str { "drain_queue" }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
         // Close the channel by dropping the queue entry — signals EOF to consumer.
@@ -144,14 +133,12 @@ impl Step for DrainQueueStep {
         let handle_slot = format!("__consumer_handle_{}", self.queue);
         let handle_opt: Option<tokio::task::JoinHandle<()>> = {
             let mut slots = ctx.slots.write().await;
-            let entry = slots.slots.get_mut(&handle_slot).with_context(|| {
-                format!(
+            let entry = slots.slots.get_mut(&handle_slot)
+                .with_context(|| format!(
                     "Consumer handle slot \"{handle_slot}\" not found — was SpawnConsumerStep run?"
-                )
-            })?;
-            let arc = entry.value.take().with_context(|| {
-                format!("Consumer handle for \"{}\" already consumed", self.queue)
-            })?;
+                ))?;
+            let arc = entry.value.take()
+                .with_context(|| format!("Consumer handle for \"{}\" already consumed", self.queue))?;
             // Unwrap the Arc — we just took the only reference from the slot.
             match std::sync::Arc::try_unwrap(arc) {
                 Ok(lock) => {

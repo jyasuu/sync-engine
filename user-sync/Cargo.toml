@@ -8,7 +8,7 @@ name = "user-sync"
 path = "src/main.rs"
 
 [dependencies]
-sync-engine          = { path = "../sync-engine" }
+sync-engine          = { path = "../sync-engine", features = ["postgres", "rabbitmq"] }
 tokio                = { version = "1",  features = ["full"] }
 anyhow               = "1"
 dotenvy              = "0.15"

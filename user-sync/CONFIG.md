@@ -60,23 +60,23 @@ Response envelope field: `data`
 
 | Field | Type |
 |-------|------|
-| `pccuid` | `String` |
-| `ssoAcct` | `String` |
-| `factNo` | `String` |
-| `localFactNo` | `Option<String>` |
-| `chineseNm` | `Option<String>` |
-| `localPnlNm` | `Option<String>` |
-| `englishNm` | `Option<String>` |
-| `contactMail` | `Option<String>` |
-| `sex` | `Option<bool>` |
-| `loPosiNm` | `Option<String>` |
+| `pccuid` | `i64` |
+| `sso_acct` | `String` |
+| `fact_no` | `String` |
+| `local_fact_no` | `Option<String>` |
+| `chinese_nm` | `Option<String>` |
+| `local_pnl_nm` | `Option<String>` |
+| `english_nm` | `Option<String>` |
+| `contact_mail` | `Option<String>` |
+| `sex` | `Option<String>` |
+| `lo_posi_nm` | `Option<String>` |
 | `disabled` | `bool` |
-| `disabledDate` | `Option<i64>` |
-| `updateDate` | `i64` |
-| `loDeptNm` | `Option<String>` |
+| `disabled_date` | `Option<i64>` |
+| `update_date` | `i64` |
+| `lo_dept_nm` | `Option<String>` |
 | `tel` | `Option<String>` |
-| `leaveMk` | `bool` |
-| `acctType` | `Option<String>` |
+| `leave_mk` | `String` |
+| `acct_type` | `i32` |
 
 ### `[record.DbUser]`  _DB target record_
 
@@ -84,7 +84,7 @@ Table: `global_users` · Primary key: `pccuid` · Upsert: `true`
 
 | Field | Type |
 |-------|------|
-| `pccuid` | `String` |
+| `pccuid` | `i64` |
 | `sso_acct` | `String` |
 | `fact_no` | `String` |
 | `local_fact_no` | `String` |
@@ -92,7 +92,7 @@ Table: `global_users` · Primary key: `pccuid` · Upsert: `true`
 | `local_pnl_nm` | `String` |
 | `english_nm` | `String` |
 | `contact_mail` | `String` |
-| `sex` | `String` |
+| `sex` | `Option<String>` |
 | `lo_posi_nm` | `String` |
 | `disabled` | `String` |
 | `disabled_date` | `Option<DateTime<Utc>>` |
@@ -100,7 +100,7 @@ Table: `global_users` · Primary key: `pccuid` · Upsert: `true`
 | `lo_dept_nm` | `String` |
 | `tel` | `String` |
 | `leave_mk` | `String` |
-| `acct_type` | `String` |
+| `acct_type` | `i32` |
 
 ### Mapping rules
 
@@ -124,13 +124,13 @@ Table: `global_users` · Primary key: `pccuid` · Upsert: `true`
 | `local_pnl_nm` | `null_to_empty` |
 | `english_nm` | `null_to_empty` |
 | `contact_mail` | `null_to_empty` |
-| `sex` | `option_bool_to_yn` |
+| `sex` | `copy` |
 | `lo_posi_nm` | `null_to_empty` |
 | `disabled` | `bool_to_yn` |
 | `disabled_date` | `epoch_ms_to_ts` |
 | `update_date` | `epoch_ms_to_ts` |
 | `lo_dept_nm` | `null_to_empty` |
 | `tel` | `null_to_empty` |
-| `leave_mk` | `bool_to_yn` |
-| `acct_type` | `null_to_empty` |
+| `leave_mk` | `copy` |
+| `acct_type` | `copy` |
 

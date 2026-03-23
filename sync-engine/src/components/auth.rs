@@ -13,12 +13,12 @@ use crate::pipeline::primitives::Auth;
 #[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
-    expires_in: i64,
+    expires_in:   i64,
 }
 
 #[derive(Clone)]
 struct Cached {
-    token: String,
+    token:      String,
     expires_at: i64,
 }
 
@@ -29,11 +29,11 @@ impl Cached {
 }
 
 pub struct OAuth2Auth {
-    client: Client,
-    token_url: String,
-    client_id: String,
+    client:        Client,
+    token_url:     String,
+    client_id:     String,
     client_secret: String,
-    cached: Arc<Mutex<Option<Cached>>>,
+    cached:        Arc<Mutex<Option<Cached>>>,
 }
 
 impl OAuth2Auth {
@@ -45,10 +45,10 @@ impl OAuth2Auth {
     ) -> Self {
         Self {
             client,
-            token_url: token_url.into(),
-            client_id: client_id.into(),
+            token_url:     token_url.into(),
+            client_id:     client_id.into(),
             client_secret: client_secret.into(),
-            cached: Arc::new(Mutex::new(None)),
+            cached:        Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -67,8 +67,8 @@ impl Auth for OAuth2Auth {
             .client
             .post(&self.token_url)
             .form(&[
-                ("grant_type", "client_credentials"),
-                ("client_id", &self.client_id),
+                ("grant_type",    "client_credentials"),
+                ("client_id",     &self.client_id),
                 ("client_secret", &self.client_secret),
             ])
             .send()
@@ -81,7 +81,7 @@ impl Auth for OAuth2Auth {
             .context("Token parse failed")?;
         info!("Token acquired; valid for {} s", resp.expires_in);
         *guard = Some(Cached {
-            token: resp.access_token.clone(),
+            token:      resp.access_token.clone(),
             expires_at: Utc::now().timestamp() + resp.expires_in,
         });
         Ok(resp.access_token)

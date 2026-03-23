@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::components::fetcher::HasEnvelope;
+#[cfg(feature = "postgres")]
 use crate::components::writer::UpsertableInTx;
 use crate::context::JobContext;
 use crate::pipeline::Transform;
@@ -35,9 +36,9 @@ pub trait StepFactory: Send + Sync {
     /// Build a SpawnConsumerStep for this model type.
     fn build_consumer(
         &self,
-        _queue: &str,
-        _commit_mode: crate::step::consumer::CommitMode,
-        _accum_slot: Option<String>,
+        _queue:        &str,
+        _commit_mode:  crate::step::consumer::CommitMode,
+        _accum_slot:   Option<String>,
     ) -> Result<Box<dyn Step>> {
         Err(anyhow!("build_consumer not supported for this factory"))
     }
@@ -47,20 +48,13 @@ pub trait StepFactory: Send + Sync {
 
 #[derive(Default)]
 pub struct TypeRegistry {
-    transforms: HashMap<String, Arc<dyn StepFactory>>,
-    models: HashMap<String, Arc<dyn StepFactory>>,
+    transforms:  HashMap<String, Arc<dyn StepFactory>>,
+    models:      HashMap<String, Arc<dyn StepFactory>>,
     queue_sends: HashMap<String, Arc<dyn StepFactory>>,
-    envelopes: HashMap<String, Arc<dyn StepFactory>>,
+    envelopes:   HashMap<String, Arc<dyn StepFactory>>,
     post_hooks: HashMap<
         String,
-        Arc<
-            dyn Fn(
-                    Arc<JobContext>,
-                )
-                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
-                + Send
-                + Sync,
-        >,
+        Arc<dyn Fn(Arc<JobContext>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> + Send + Sync>,
     >,
 }
 
@@ -82,30 +76,23 @@ impl TypeRegistry {
         let factory = TransformFactory::<Src, Dst, Xfm> {
             _phantom: std::marker::PhantomData,
         };
-        self.transforms.insert(name.to_owned(), Arc::new(factory));
+        self.transforms
+            .insert(name.to_owned(), Arc::new(factory));
     }
 
     /// Register a generated UpsertableInTx model type by name.
     /// Builds both a `TxUpsertStep<T>` and a `SendToQueueStep<T>` when the
     /// name appears in TOML — allowing the same model to be used in either
     /// the direct-commit (case 1/2) or producer/consumer (case 3/4) pattern.
+    #[cfg(feature = "postgres")]
     pub fn register_model<T>(&mut self, name: &str)
     where
         T: UpsertableInTx + Any + Send + Sync + Clone + serde::Serialize + 'static,
     {
-        // tx_upsert factory
-        let upsert_factory = ModelFactory::<T> {
-            _phantom: std::marker::PhantomData,
-        };
-        self.models
-            .insert(name.to_owned(), Arc::new(upsert_factory));
-
-        // send_to_queue factory — same model, different step
-        let queue_factory = QueueSendFactory::<T> {
-            _phantom: std::marker::PhantomData,
-        };
-        self.queue_sends
-            .insert(name.to_owned(), Arc::new(queue_factory));
+        let upsert_factory = ModelFactory::<T> { _phantom: std::marker::PhantomData };
+        self.models.insert(name.to_owned(), Arc::new(upsert_factory));
+        let queue_factory  = QueueSendFactory::<T> { _phantom: std::marker::PhantomData };
+        self.queue_sends.insert(name.to_owned(), Arc::new(queue_factory));
     }
 
     /// Register a generated HasEnvelope type by name.
@@ -127,8 +114,10 @@ impl TypeRegistry {
         F: Fn(Arc<JobContext>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<()>> + Send + 'static,
     {
-        self.post_hooks
-            .insert(name.to_owned(), Arc::new(move |ctx| Box::pin(f(ctx))));
+        self.post_hooks.insert(
+            name.to_owned(),
+            Arc::new(move |ctx| Box::pin(f(ctx))),
+        );
     }
 
     // ── Lookup ────────────────────────────────────────────────────────────
@@ -144,33 +133,31 @@ impl TypeRegistry {
             .build(params)
     }
 
-    pub fn build_model_sink(
-        &self,
-        name: &str,
-        params: &HashMap<String, String>,
-    ) -> Result<Box<dyn Step>> {
-        self.models
-            .get(name)
-            .ok_or_else(|| anyhow!("Model \"{name}\" not registered — call registry.register_model::<{name}>(\"{name}\") in main.rs"))?
+    #[cfg(feature = "postgres")]
+    pub fn build_model_sink(&self, name: &str, params: &HashMap<String, String>) -> Result<Box<dyn Step>> {
+        self.models.get(name)
+            .ok_or_else(|| anyhow!("Model \"{name}\" not registered — add registry.register_model::<{name}>(\"{name}\") in main.rs"))?
             .build(params)
     }
 
-    pub fn build_queue_send(
-        &self,
-        name: &str,
-        params: &HashMap<String, String>,
+    #[cfg(feature = "postgres")]
+    pub fn build_consumer(
+        &self, model: &str, queue: &str,
+        commit_mode: crate::step::consumer::CommitMode,
+        accum_slot:  Option<String>,
     ) -> Result<Box<dyn Step>> {
-        self.queue_sends
-            .get(name)
-            .ok_or_else(|| anyhow!("Model \"{name}\" not registered for queue send — call registry.register_model::<{name}>(\"{name}\") in main.rs"))?
+        self.models.get(model)
+            .ok_or_else(|| anyhow!("Model \"{model}\" not registered — add registry.register_model::<{model}>(\"{model}\") in main.rs"))?
+            .build_consumer(queue, commit_mode, accum_slot)
+    }
+
+    pub fn build_queue_send(&self, name: &str, params: &HashMap<String, String>) -> Result<Box<dyn Step>> {
+        self.queue_sends.get(name)
+            .ok_or_else(|| anyhow!("Model \"{name}\" not registered for queue send — add registry.register_model::<{name}>(\"{name}\") in main.rs"))?
             .build(params)
     }
 
-    pub fn build_fetch(
-        &self,
-        name: &str,
-        params: &HashMap<String, String>,
-    ) -> Result<Box<dyn Step>> {
+    pub fn build_fetch(&self, name: &str, params: &HashMap<String, String>) -> Result<Box<dyn Step>> {
         self.envelopes
             .get(name)
             .ok_or_else(|| anyhow!("Envelope \"{name}\" not registered — call registry.register_envelope::<{name}>(\"{name}\") in main.rs"))?
@@ -180,46 +167,16 @@ impl TypeRegistry {
     pub fn get_post_hook(
         &self,
         name: &str,
-    ) -> Option<
-        Arc<
-            dyn Fn(
-                    Arc<JobContext>,
-                )
-                    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
-                + Send
-                + Sync,
-        >,
-    > {
+    ) -> Option<Arc<dyn Fn(Arc<JobContext>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> + Send + Sync>> {
         self.post_hooks.get(name).cloned()
     }
 
     // ── Validation helpers ────────────────────────────────────────────────
-    pub fn has_transform(&self, name: &str) -> bool {
-        self.transforms.contains_key(name)
-    }
-    pub fn has_model(&self, name: &str) -> bool {
-        self.models.contains_key(name)
-    }
-    pub fn has_queue_send(&self, name: &str) -> bool {
-        self.queue_sends.contains_key(name)
-    }
-    pub fn has_envelope(&self, name: &str) -> bool {
-        self.envelopes.contains_key(name)
-    }
-
-    /// Build a spawn_consumer step for a registered model.
-    pub fn build_consumer(
-        &self,
-        model: &str,
-        queue: &str,
-        commit_mode: crate::step::consumer::CommitMode,
-        accum_slot: Option<String>,
-    ) -> Result<Box<dyn Step>> {
-        self.models
-            .get(model)
-            .ok_or_else(|| anyhow!("Model \"{model}\" not registered — add registry.register_model::<{model}>(\"{model}\") in main.rs"))?
-            .build_consumer(queue, commit_mode, accum_slot)
-    }
+    pub fn has_transform(&self,  name: &str) -> bool { self.transforms.contains_key(name) }
+    #[cfg(feature = "postgres")]
+    pub fn has_model(&self,      name: &str) -> bool { self.models.contains_key(name) }
+    pub fn has_queue_send(&self, name: &str) -> bool { self.queue_sends.contains_key(name) }
+    pub fn has_envelope(&self,   name: &str) -> bool { self.envelopes.contains_key(name) }
 }
 
 // ── Concrete factories ────────────────────────────────────────────────────
@@ -235,54 +192,44 @@ where
     Xfm: Transform<Input = Src, Output = Dst> + Default + Send + Sync + 'static,
 {
     fn build(&self, params: &HashMap<String, String>) -> Result<Box<dyn Step>> {
-        let reads = params
-            .get("reads")
-            .cloned()
-            .unwrap_or_else(|| "api_rows".into());
-        let writes = params
-            .get("writes")
-            .cloned()
-            .unwrap_or_else(|| "db_rows".into());
+        let reads  = params.get("reads").cloned().unwrap_or_else(|| "api_rows".into());
+        let writes = params.get("writes").cloned().unwrap_or_else(|| "db_rows".into());
         let append = params.get("append").map(|v| v == "true").unwrap_or(false);
-        Ok(Box::new(crate::step::transform::TransformStep::<
-            Src,
-            Dst,
-            Xfm,
-        >::new(
-            reads, writes, append, Xfm::default()
+        Ok(Box::new(crate::step::transform::TransformStep::<Src, Dst, Xfm>::new(
+            reads, writes, append, Xfm::default(),
         )))
     }
 }
 
+#[cfg(feature = "postgres")]
 struct ModelFactory<T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
+#[cfg(feature = "postgres")]
 impl<T> StepFactory for ModelFactory<T>
 where
     T: UpsertableInTx + Any + Send + Sync + Clone + serde::Serialize + 'static,
 {
     fn build(&self, params: &HashMap<String, String>) -> Result<Box<dyn Step>> {
-        let reads = params
-            .get("reads")
-            .cloned()
-            .unwrap_or_else(|| "db_rows".into());
+        let reads = params.get("reads").cloned().unwrap_or_else(|| "db_rows".into());
         Ok(Box::new(crate::step::sink::TxUpsertStep::<T>::new(reads)))
     }
 
     fn build_consumer(
-        &self,
-        queue: &str,
+        &self, queue: &str,
         commit_mode: crate::step::consumer::CommitMode,
-        accum_slot: Option<String>,
+        accum_slot:  Option<String>,
     ) -> Result<Box<dyn Step>> {
         use crate::step::consumer::{CommitMode, SpawnConsumerStep};
         Ok(match commit_mode {
-            CommitMode::PerBatch => Box::new(SpawnConsumerStep::<T>::per_batch(queue)),
-            CommitMode::DrainInPostJob => Box::new(SpawnConsumerStep::<T>::drain_in_post_job(
-                queue,
-                accum_slot.unwrap_or_else(|| format!("__accum_{queue}")),
-            )),
+            CommitMode::PerBatch =>
+                Box::new(SpawnConsumerStep::<T>::per_batch(queue)),
+            CommitMode::DrainInPostJob =>
+                Box::new(SpawnConsumerStep::<T>::drain_in_post_job(
+                    queue,
+                    accum_slot.unwrap_or_else(|| format!("__accum_{queue}")),
+                )),
         })
     }
 }
@@ -299,14 +246,8 @@ where
     T: Any + Send + Sync + Clone + serde::Serialize + 'static,
 {
     fn build(&self, params: &HashMap<String, String>) -> Result<Box<dyn Step>> {
-        let reads = params
-            .get("reads")
-            .cloned()
-            .unwrap_or_else(|| "db_rows".into());
-        let queue = params
-            .get("queue")
-            .cloned()
-            .unwrap_or_else(|| "db_rows".into());
+        let reads = params.get("reads").cloned().unwrap_or_else(|| "db_rows".into());
+        let queue = params.get("queue").cloned().unwrap_or_else(|| "db_rows".into());
         Ok(Box::new(AutoQueueSendStep::<T> {
             reads,
             queue,
@@ -327,22 +268,24 @@ impl<T> Step for AutoQueueSendStep<T>
 where
     T: Any + Send + Sync + Clone + serde::Serialize + 'static,
 {
-    fn name(&self) -> &str {
-        "send_to_queue"
-    }
+    fn name(&self) -> &str { "send_to_queue" }
 
     async fn run(&self, ctx: &crate::context::JobContext) -> anyhow::Result<()> {
         let rmq_slot = format!("__rmq_queue_{}", self.queue);
         if ctx.slot_is_set(&rmq_slot).await {
             // RabbitMQ path
-            crate::step::queue_send::RabbitmqSendStep::<T>::new(&self.reads, &self.queue)
-                .run(ctx)
-                .await
+            crate::step::queue_send::RabbitmqSendStep::<T>::new(
+                &self.reads, &self.queue,
+            )
+            .run(ctx)
+            .await
         } else {
             // Tokio mpsc path
-            crate::step::sink::SendToQueueStep::<T>::new(&self.reads, &self.queue)
-                .run(ctx)
-                .await
+            crate::step::sink::SendToQueueStep::<T>::new(
+                &self.reads, &self.queue,
+            )
+            .run(ctx)
+            .await
         }
     }
 }
@@ -357,13 +300,8 @@ where
     Env::Item: Any + Send + Sync + Clone + 'static,
 {
     fn build(&self, params: &HashMap<String, String>) -> Result<Box<dyn Step>> {
-        let writes = params
-            .get("writes")
-            .cloned()
-            .unwrap_or_else(|| "api_rows".into());
+        let writes = params.get("writes").cloned().unwrap_or_else(|| "api_rows".into());
         let append = params.get("append").map(|v| v == "true").unwrap_or(false);
-        Ok(Box::new(crate::step::fetch::FetchJsonStep::<Env>::new(
-            writes, append,
-        )))
+        Ok(Box::new(crate::step::fetch::FetchJsonStep::<Env>::new(writes, append)))
     }
 }

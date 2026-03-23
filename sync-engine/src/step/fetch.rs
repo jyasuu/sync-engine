@@ -10,7 +10,7 @@ use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use std::marker::PhantomData;
 use std::time::Duration;
-use tracing::{debug, error, info};
+use tracing::{debug, info, error};
 
 use crate::components::fetcher::HasEnvelope;
 use crate::context::JobContext;
@@ -36,7 +36,7 @@ where
 {
     pub fn new(writes: impl Into<String>, append: bool) -> Self {
         Self {
-            writes: writes.into(),
+            writes:   writes.into(),
             append,
             _phantom: PhantomData,
         }
@@ -49,20 +49,18 @@ where
     Env: HasEnvelope + DeserializeOwned + Send + Sync + 'static,
     Env::Item: Send + Sync + Clone + std::any::Any + 'static,
 {
-    fn name(&self) -> &str {
-        "fetch_json"
-    }
+    fn name(&self) -> &str { "fetch_json" }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
-        let window = ctx.window.read().await;
+        let window    = ctx.window.read().await;
         let start_str = window.start_str.clone();
-        let end_str = window.end_str.clone();
+        let end_str   = window.end_str.clone();
         drop(window);
 
-        let endpoint = ctx.connections.endpoint.clone();
+        let endpoint    = ctx.connections.endpoint.clone();
         let start_param = ctx.connections.start_param.as_str();
-        let end_param = ctx.connections.end_param.as_str();
-        let token = ctx.connections.auth.get_token().await?;
+        let end_param   = ctx.connections.end_param.as_str();
+        let token       = ctx.connections.auth.get_token().await?;
 
         debug!(endpoint = %endpoint, start = %start_str, end = %end_str, "HTTP fetch");
 
@@ -78,7 +76,7 @@ where
             req = req.query(&[(k, v)]);
         }
 
-        let resp = req.send().await.context("HTTP send failed")?;
+        let resp   = req.send().await.context("HTTP send failed")?;
         let status = resp.status();
 
         if status == StatusCode::UNAUTHORIZED {
@@ -86,7 +84,7 @@ where
             anyhow::bail!("401 — token invalidated, will retry");
         }
 
-        let resp = resp.error_for_status().context("API error status")?;
+        let resp  = resp.error_for_status().context("API error status")?;
         let bytes = resp.bytes().await.context("Failed to read body")?;
         info!(bytes = bytes.len(), "Body received");
 
@@ -112,8 +110,7 @@ where
         }
         // Accumulate into job-scoped total
         let prev: usize = ctx.slot_read("summary.total_fetched").await.unwrap_or(0);
-        ctx.slot_write("summary.total_fetched", prev + count)
-            .await?;
+        ctx.slot_write("summary.total_fetched", prev + count).await?;
 
         // Window-scoped count for this attempt
         ctx.slot_write("window.fetched", count).await?;

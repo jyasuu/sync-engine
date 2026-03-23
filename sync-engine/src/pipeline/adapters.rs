@@ -37,17 +37,15 @@ where
             .into_iter()
             .filter_map(|boxed| {
                 let typed = match boxed.downcast::<I>() {
-                    Ok(v) => *v,
+                    Ok(v)  => *v,
                     Err(_) => {
-                        warn!(
-                            "Type mismatch: source item ≠ transform input — check component.toml"
-                        );
+                        warn!("Type mismatch: source item ≠ transform input — check component.toml");
                         return None;
                     }
                 };
                 match self.0.apply(typed) {
                     Ok(out) => Some(Box::new(out) as Box<dyn Any + Send>),
-                    Err(e) => {
+                    Err(e)  => {
                         warn!(error = %e, "Transform failed — item skipped");
                         None
                     }
@@ -69,16 +67,11 @@ where
         let typed: Vec<K::Item> = items
             .into_iter()
             .filter_map(|b| match b.downcast::<K::Item>() {
-                Ok(v) => Some(*v),
-                Err(_) => {
-                    warn!("Type mismatch: transform output ≠ sink input");
-                    None
-                }
+                Ok(v)  => Some(*v),
+                Err(_) => { warn!("Type mismatch: transform output ≠ sink input"); None }
             })
             .collect();
         self.0.write(typed).await;
     }
-    async fn on_complete(&self) {
-        self.0.on_complete().await;
-    }
+    async fn on_complete(&self) { self.0.on_complete().await; }
 }

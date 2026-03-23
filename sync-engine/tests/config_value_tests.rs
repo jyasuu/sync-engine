@@ -21,9 +21,8 @@ fn test_env_missing_with_default() {
     std::env::remove_var("TEST_ENGINE_MISSING");
     let v: ConfigValue = toml::from_str(
         r#"env = "TEST_ENGINE_MISSING"
-           default = "fallback""#,
-    )
-    .unwrap();
+           default = "fallback""#
+    ).unwrap();
     assert_eq!(v.resolve().unwrap(), "fallback");
 }
 
@@ -31,15 +30,9 @@ fn test_env_missing_with_default() {
 fn test_env_missing_no_default_errors() {
     std::env::remove_var("TEST_ENGINE_REQUIRED");
     let v: ConfigValue = toml::from_str(r#"env = "TEST_ENGINE_REQUIRED""#).unwrap();
-    assert!(
-        v.resolve().is_err(),
-        "missing required env var should return error"
-    );
+    assert!(v.resolve().is_err(), "missing required env var should return error");
     let msg = v.resolve().unwrap_err().to_string();
-    assert!(
-        msg.contains("TEST_ENGINE_REQUIRED"),
-        "error should name the missing var"
-    );
+    assert!(msg.contains("TEST_ENGINE_REQUIRED"), "error should name the missing var");
 }
 
 #[test]

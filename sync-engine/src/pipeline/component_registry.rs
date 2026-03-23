@@ -59,18 +59,18 @@ pub trait AnyPostHook: Send + Sync {
 #[derive(Debug, Deserialize)]
 pub struct ComponentToml {
     #[serde(default)]
-    pub source: HashMap<String, SourceDef>,
+    pub source:    HashMap<String, SourceDef>,
     #[serde(default)]
     pub transform: HashMap<String, TransformDef>,
     #[serde(default)]
-    pub sink: HashMap<String, SinkDef>,
+    pub sink:      HashMap<String, SinkDef>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SourceDef {
-    pub chunker: String,
-    pub auth: String,
-    pub fetcher: String,
+    pub chunker:  String,
+    pub auth:     String,
+    pub fetcher:  String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,7 +80,7 @@ pub struct TransformDef {
 
 #[derive(Debug, Deserialize)]
 pub struct SinkDef {
-    pub writer: String,
+    pub writer:    String,
     pub post_hook: Option<String>,
 }
 
@@ -93,11 +93,11 @@ type AsyncFactory<T> =
 
 #[derive(Default)]
 pub struct PrimitiveRegistry {
-    chunkers: HashMap<String, AsyncFactory<Box<dyn Chunker>>>,
-    auths: HashMap<String, AsyncFactory<Box<dyn Auth>>>,
-    fetchers: HashMap<String, AsyncFactory<Box<dyn AnyFetcher>>>,
-    mappers: HashMap<String, AsyncFactory<Box<dyn AnyTransform>>>,
-    writers: HashMap<String, AsyncFactory<Box<dyn AnyWriter>>>,
+    chunkers:   HashMap<String, AsyncFactory<Box<dyn Chunker>>>,
+    auths:      HashMap<String, AsyncFactory<Box<dyn Auth>>>,
+    fetchers:   HashMap<String, AsyncFactory<Box<dyn AnyFetcher>>>,
+    mappers:    HashMap<String, AsyncFactory<Box<dyn AnyTransform>>>,
+    writers:    HashMap<String, AsyncFactory<Box<dyn AnyWriter>>>,
     post_hooks: HashMap<String, AsyncFactory<Box<dyn AnyPostHook>>>,
 }
 
@@ -108,9 +108,7 @@ macro_rules! register_fn {
 }
 
 impl PrimitiveRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
 
     pub fn register_chunker<F, Fut>(&mut self, key: &str, f: F)
     where
@@ -186,19 +184,15 @@ impl PrimitiveRegistry {
                 let (p, ck, ak, fk) = (Arc::clone(&p), ck.clone(), ak.clone(), fk.clone());
                 async move {
                     let chunker = p.chunkers[&ck]().await?;
-                    let auth = p.auths[&ak]().await?;
+                    let auth    = p.auths[&ak]().await?;
                     let fetcher = p.fetchers[&fk]().await?;
-                    Ok(Box::new(ErasedComposedSource {
-                        chunker,
-                        auth,
-                        fetcher,
-                    }) as Box<dyn AnySource>)
+                    Ok(Box::new(ErasedComposedSource { chunker, auth, fetcher }) as Box<dyn AnySource>)
                 }
             });
         }
 
         for (name, xf) in def.transform {
-            let p = Arc::clone(&prim);
+            let p  = Arc::clone(&prim);
             let mk = xf.mapper.clone();
             if !p.mappers.contains_key(&mk) {
                 return Err(anyhow!("Unknown mapper: \"{mk}\" in [transform.{name}]"));
@@ -225,7 +219,7 @@ impl PrimitiveRegistry {
             registry.register_sink(&name, move || {
                 let (p, wk, hk) = (Arc::clone(&p), wk.clone(), hk.clone());
                 async move {
-                    let writer = p.writers[&wk]().await?;
+                    let writer    = p.writers[&wk]().await?;
                     let post_hook = if let Some(ref k) = hk {
                         Some(p.post_hooks[k]().await?)
                     } else {
@@ -244,7 +238,7 @@ impl PrimitiveRegistry {
 
 struct ErasedComposedSource {
     chunker: Box<dyn Chunker>,
-    auth: Box<dyn Auth>,
+    auth:    Box<dyn Auth>,
     fetcher: Box<dyn AnyFetcher>,
 }
 
@@ -267,7 +261,7 @@ impl AnySource for ErasedComposedSource {
         .await;
         match result {
             Ok(items) => Some(items),
-            Err(e) => {
+            Err(e)    => {
                 tracing::error!(error = %e, "Fetch failed");
                 Some(vec![])
             }
@@ -276,7 +270,7 @@ impl AnySource for ErasedComposedSource {
 }
 
 struct AssembledSink {
-    writer: Box<dyn AnyWriter>,
+    writer:    Box<dyn AnyWriter>,
     post_hook: Option<Box<dyn AnyPostHook>>,
 }
 

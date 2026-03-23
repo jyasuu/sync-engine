@@ -82,7 +82,10 @@ impl SlotMap {
 
     /// Read a typed value from a slot, cloning it out.
     /// Returns `Err` if the slot is undeclared or not yet written.
-    pub async fn read<T: Any + Send + Sync + Clone + 'static>(&self, key: &str) -> Result<T> {
+    pub async fn read<T: Any + Send + Sync + Clone + 'static>(
+        &self,
+        key: &str,
+    ) -> Result<T> {
         let entry = self
             .slots
             .get(key)
@@ -103,7 +106,10 @@ impl SlotMap {
     /// Take the value out of a slot, replacing it with None.
     /// Useful when the consumer wants to own the data (avoids a clone for Vec<T>).
     /// If the Arc has multiple holders (rare), falls back to a clone via read().
-    pub async fn take<T: Any + Send + Sync + Clone + 'static>(&mut self, key: &str) -> Result<T> {
+    pub async fn take<T: Any + Send + Sync + Clone + 'static>(
+        &mut self,
+        key: &str,
+    ) -> Result<T> {
         let entry = self
             .slots
             .get_mut(key)
@@ -116,11 +122,12 @@ impl SlotMap {
 
         // Fast path: we're the only holder — unwrap directly.
         match Arc::try_unwrap(arc) {
-            Ok(lock) => lock
-                .into_inner()
-                .downcast::<T>()
-                .map(|b| *b)
-                .map_err(|_| anyhow!("Slot \"{key}\" type mismatch on take")),
+            Ok(lock) => {
+                lock.into_inner()
+                    .downcast::<T>()
+                    .map(|b| *b)
+                    .map_err(|_| anyhow!("Slot \"{key}\" type mismatch on take"))
+            }
             // Slow path: something else holds a reference — clone the value
             // and put the Arc back so the slot remains usable.
             Err(arc) => {
@@ -161,7 +168,10 @@ impl SlotMap {
 
     /// Returns true if the slot has been written at least once.
     pub fn is_set(&self, key: &str) -> bool {
-        self.slots.get(key).and_then(|e| e.value.as_ref()).is_some()
+        self.slots
+            .get(key)
+            .and_then(|e| e.value.as_ref())
+            .is_some()
     }
 
     /// Clear all slots of a given scope (called by the engine, not by steps).

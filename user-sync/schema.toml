@@ -10,49 +10,49 @@
 # ── API response record ───────────────────────────────────────────────────
 
 [record.ApiUser]
-serde_rename = "camelCase"
+serde_rename = "snake_case"
 
 [record.ApiUser.fetcher]
 envelope_field = "data"
 
 [[record.ApiUser.fields]]
 name = "pccuid"
+type = "i64"
+
+[[record.ApiUser.fields]]
+name = "sso_acct"
 type = "String"
 
 [[record.ApiUser.fields]]
-name = "ssoAcct"
+name = "fact_no"
 type = "String"
 
 [[record.ApiUser.fields]]
-name = "factNo"
-type = "String"
-
-[[record.ApiUser.fields]]
-name = "localFactNo"
+name = "local_fact_no"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
-name = "chineseNm"
+name = "chinese_nm"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
-name = "localPnlNm"
+name = "local_pnl_nm"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
-name = "englishNm"
+name = "english_nm"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
-name = "contactMail"
+name = "contact_mail"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
 name = "sex"
-type = "Option<bool>"
+type = "Option<String>"
 
 [[record.ApiUser.fields]]
-name = "loPosiNm"
+name = "lo_posi_nm"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
@@ -60,15 +60,15 @@ name = "disabled"
 type = "bool"
 
 [[record.ApiUser.fields]]
-name = "disabledDate"
+name = "disabled_date"
 type = "Option<i64>"
 
 [[record.ApiUser.fields]]
-name = "updateDate"
+name = "update_date"
 type = "i64"
 
 [[record.ApiUser.fields]]
-name = "loDeptNm"
+name = "lo_dept_nm"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
@@ -76,12 +76,12 @@ name = "tel"
 type = "Option<String>"
 
 [[record.ApiUser.fields]]
-name = "leaveMk"
-type = "bool"
+name = "leave_mk"
+type = "String"
 
 [[record.ApiUser.fields]]
-name = "acctType"
-type = "Option<String>"
+name = "acct_type"
+type = "i32"
 
 # ── DB target record ──────────────────────────────────────────────────────
 
@@ -91,11 +91,11 @@ type = "Option<String>"
 table       = "global_users"
 primary_key = "pccuid"
 upsert      = true
-extra_copy  = ["id = pccuid"]
+# extra_copy  = ["pccuid = pccuid"]
 
 [[record.DbUser.fields]]
 name = "pccuid"
-type = "String"
+type = "i64"
 
 [[record.DbUser.fields]]
 name = "sso_acct"
@@ -127,7 +127,7 @@ type = "String"
 
 [[record.DbUser.fields]]
 name = "sex"
-type = "String"
+type = "Option<String>"
 
 [[record.DbUser.fields]]
 name = "lo_posi_nm"
@@ -159,7 +159,7 @@ type = "String"
 
 [[record.DbUser.fields]]
 name = "acct_type"
-type = "String"
+type = "i32"
 
 # ── Field mapping rules ───────────────────────────────────────────────────
 #
@@ -178,46 +178,46 @@ rule   = "copy"
 
 [[mapping.user.rules]]
 field  = "sso_acct"
-source = "ssoAcct"
+source = "sso_acct"
 rule   = "copy"
 
 [[mapping.user.rules]]
 field  = "fact_no"
-source = "factNo"
+source = "fact_no"
 rule   = "copy"
 
 [[mapping.user.rules]]
 field  = "local_fact_no"
-source = "localFactNo"
+source = "local_fact_no"
 rule   = "null_to_empty"
 
 [[mapping.user.rules]]
 field  = "chinese_nm"
-source = "chineseNm"
+source = "chinese_nm"
 rule   = "null_to_empty"
 
 [[mapping.user.rules]]
 field  = "local_pnl_nm"
-source = "localPnlNm"
+source = "local_pnl_nm"
 rule   = "null_to_empty"
 
 [[mapping.user.rules]]
 field  = "english_nm"
-source = "englishNm"
+source = "english_nm"
 rule   = "null_to_empty"
 
 [[mapping.user.rules]]
 field  = "contact_mail"
-source = "contactMail"
+source = "contact_mail"
 rule   = "null_to_empty"
 
 [[mapping.user.rules]]
 field  = "sex"
-rule   = "option_bool_to_yn"
+rule   = "copy"
 
 [[mapping.user.rules]]
 field  = "lo_posi_nm"
-source = "loPosiNm"
+source = "lo_posi_nm"
 rule   = "null_to_empty"
 
 [[mapping.user.rules]]
@@ -226,17 +226,17 @@ rule   = "bool_to_yn"
 
 [[mapping.user.rules]]
 field  = "disabled_date"
-source = "disabledDate"
+source = "disabled_date"
 rule   = "epoch_ms_to_ts"
 
 [[mapping.user.rules]]
 field  = "update_date"
-source = "updateDate"
+source = "update_date"
 rule   = "epoch_ms_to_ts"
 
 [[mapping.user.rules]]
 field  = "lo_dept_nm"
-source = "loDeptNm"
+source = "lo_dept_nm"
 rule   = "null_to_empty"
 
 [[mapping.user.rules]]
@@ -245,10 +245,10 @@ rule   = "null_to_empty"
 
 [[mapping.user.rules]]
 field  = "leave_mk"
-source = "leaveMk"
-rule   = "bool_to_yn"
+source = "leave_mk"
+rule   = "copy"
 
 [[mapping.user.rules]]
 field  = "acct_type"
-source = "acctType"
-rule   = "null_to_empty"
+source = "acct_type"
+rule   = "copy"

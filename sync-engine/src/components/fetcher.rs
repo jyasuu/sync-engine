@@ -15,19 +15,23 @@ pub trait HasEnvelope: DeserializeOwned + Send {
 }
 
 pub struct HttpJsonFetcher<T> {
-    client: Client,
-    endpoint: String,
-    realm_type: Option<String>,
-    _phantom: std::marker::PhantomData<T>,
+    client:      Client,
+    endpoint:    String,
+    realm_type:  Option<String>,
+    _phantom:    std::marker::PhantomData<T>,
 }
 
 impl<T: HasEnvelope> HttpJsonFetcher<T> {
-    pub fn new(client: Client, endpoint: impl Into<String>, realm_type: Option<String>) -> Self {
+    pub fn new(
+        client:     Client,
+        endpoint:   impl Into<String>,
+        realm_type: Option<String>,
+    ) -> Self {
         Self {
             client,
-            endpoint: endpoint.into(),
+            endpoint:  endpoint.into(),
             realm_type,
-            _phantom: std::marker::PhantomData,
+            _phantom:  std::marker::PhantomData,
         }
     }
 }

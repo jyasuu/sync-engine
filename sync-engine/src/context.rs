@@ -39,7 +39,9 @@ impl QueueEntry {
     }
 
     /// Take the receiver — can only be called once (by the consumer task).
-    pub async fn take_rx(&self) -> Option<mpsc::Receiver<Box<dyn std::any::Any + Send>>> {
+    pub async fn take_rx(
+        &self,
+    ) -> Option<mpsc::Receiver<Box<dyn std::any::Any + Send>>> {
         self.rx.lock().await.take()
     }
 }
@@ -49,15 +51,16 @@ impl QueueEntry {
 /// All external connections created in pre_job and shared read-only.
 #[derive(Clone)]
 pub struct Connections {
-    pub db: sqlx::PgPool,
-    pub auth: Arc<OAuth2Auth>,
-    pub http: reqwest::Client,
-    pub endpoint: String,
+    #[cfg(feature = "postgres")]
+    pub db:          sqlx::PgPool,
+    pub auth:        Arc<OAuth2Auth>,
+    pub http:        reqwest::Client,
+    pub endpoint:    String,
     pub extra_query: Vec<(String, String)>,
     /// Query param name for window start (default: "start_time")
     pub start_param: String,
     /// Query param name for window end (default: "end_time")
-    pub end_param: String,
+    pub end_param:   String,
     /// strftime format string for date params (default: "%Y%m%d")
     pub date_format: String,
 }
@@ -68,11 +71,11 @@ pub struct Connections {
 /// Steps can read this to know which window they are processing.
 #[derive(Debug, Clone, Default)]
 pub struct WindowMeta {
-    pub start_day: i64, // days-ago value
-    pub end_day: i64,
+    pub start_day: i64,   // days-ago value
+    pub end_day:   i64,
     pub start_str: String, // formatted for API query
-    pub end_str: String,
-    pub index: usize, // 0-based window number
+    pub end_str:   String,
+    pub index:     usize,  // 0-based window number
 }
 
 // ── JobContext ────────────────────────────────────────────────────────────
@@ -105,12 +108,12 @@ impl JobContext {
         job_name: impl Into<String>,
     ) -> Self {
         Self {
-            slots: RwLock::new(SlotMap::new()),
+            slots:       RwLock::new(SlotMap::new()),
             connections,
-            queues: RwLock::new(HashMap::new()),
-            window: RwLock::new(WindowMeta::default()),
+            queues:      RwLock::new(HashMap::new()),
+            window:      RwLock::new(WindowMeta::default()),
             config,
-            job_name: job_name.into(),
+            job_name:    job_name.into(),
         }
     }
 
@@ -144,11 +147,7 @@ impl JobContext {
     }
 
     pub async fn clear_window_slots(&self) {
-        self.slots
-            .write()
-            .await
-            .clear_scope(SlotScope::Window)
-            .await;
+        self.slots.write().await.clear_scope(SlotScope::Window).await;
     }
 
     pub async fn clear_job_slots(&self) {

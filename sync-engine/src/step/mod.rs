@@ -1,8 +1,9 @@
 // sync-engine/src/step/mod.rs
 
-pub mod consumer;
 pub mod control;
+pub mod consumer;
 pub mod fetch;
+#[cfg(feature = "rabbitmq")]
 pub mod queue_send;
 pub mod setup;
 pub mod sink;

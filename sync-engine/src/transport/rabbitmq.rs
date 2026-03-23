@@ -1,5 +1,5 @@
-// sync-engine/src/transport/rabbitmq.rs
-//
+// sync-engine/src/transport/rabbitmq.rs — requires feature "rabbitmq"
+#![cfg(feature = "rabbitmq")]
 // RabbitMQ transport for the producer/consumer pipeline pattern (case 4).
 //
 // RabbitmqProducer  — publishes serialized items to an exchange.
@@ -13,11 +13,12 @@ use anyhow::{Context, Result};
 use futures_lite::StreamExt;
 use lapin::{
     options::{
-        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions,
-        QueueBindOptions, QueueDeclareOptions,
+        BasicAckOptions, BasicConsumeOptions, BasicPublishOptions,
+        ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions,
     },
     types::FieldTable,
-    BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind,
+    BasicProperties, Channel, Connection, ConnectionProperties,
+    ExchangeKind,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
@@ -28,11 +29,11 @@ use tracing::{error, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct RabbitmqConfig {
-    pub url: String,
-    pub exchange: String,
+    pub url:         String,
+    pub exchange:    String,
     pub routing_key: String,
     /// Consumer queue name — defaults to "{exchange}.{routing_key}"
-    pub queue_name: Option<String>,
+    pub queue_name:  Option<String>,
 }
 
 impl RabbitmqConfig {
@@ -49,10 +50,7 @@ async fn open_channel(url: &str) -> Result<Channel> {
     let conn = Connection::connect(url, ConnectionProperties::default())
         .await
         .with_context(|| format!("RabbitMQ connect failed: {url}"))?;
-    let channel = conn
-        .create_channel()
-        .await
-        .context("RabbitMQ create channel")?;
+    let channel = conn.create_channel().await.context("RabbitMQ create channel")?;
     Ok(channel)
 }
 
@@ -60,8 +58,8 @@ async fn open_channel(url: &str) -> Result<Channel> {
 
 /// Publishes JSON-serialized items to a RabbitMQ exchange.
 pub struct RabbitmqProducer {
-    channel: Arc<Mutex<Channel>>,
-    config: RabbitmqConfig,
+    channel:     Arc<Mutex<Channel>>,
+    config:      RabbitmqConfig,
 }
 
 impl RabbitmqProducer {
@@ -73,10 +71,7 @@ impl RabbitmqProducer {
             .exchange_declare(
                 &config.exchange,
                 ExchangeKind::Direct,
-                ExchangeDeclareOptions {
-                    durable: true,
-                    ..Default::default()
-                },
+                ExchangeDeclareOptions { durable: true, ..Default::default() },
                 FieldTable::default(),
             )
             .await
@@ -93,7 +88,8 @@ impl RabbitmqProducer {
 
     /// Publish a single item as a JSON message.
     pub async fn publish<T: Serialize>(&self, item: &T) -> Result<()> {
-        let payload = serde_json::to_vec(item).context("RabbitMQ: JSON serialization failed")?;
+        let payload = serde_json::to_vec(item)
+            .context("RabbitMQ: JSON serialization failed")?;
 
         let ch = self.channel.lock().await;
         ch.basic_publish(
@@ -140,7 +136,7 @@ impl RabbitmqConsumer {
     /// Returns when the connection is closed or `shutdown` is signalled.
     pub async fn run<T, F, Fut>(
         &self,
-        handler: F,
+        handler:  F,
         shutdown: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<()>
     where
@@ -148,7 +144,7 @@ impl RabbitmqConsumer {
         F: Fn(T) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<()>> + Send + 'static,
     {
-        let channel = open_channel(&self.config.url).await?;
+        let channel   = open_channel(&self.config.url).await?;
         let queue_name = self.config.queue();
 
         // Declare exchange + queue + binding — idempotent
@@ -156,10 +152,7 @@ impl RabbitmqConsumer {
             .exchange_declare(
                 &self.config.exchange,
                 ExchangeKind::Direct,
-                ExchangeDeclareOptions {
-                    durable: true,
-                    ..Default::default()
-                },
+                ExchangeDeclareOptions { durable: true, ..Default::default() },
                 FieldTable::default(),
             )
             .await
@@ -168,10 +161,7 @@ impl RabbitmqConsumer {
         channel
             .queue_declare(
                 &queue_name,
-                QueueDeclareOptions {
-                    durable: true,
-                    ..Default::default()
-                },
+                QueueDeclareOptions { durable: true, ..Default::default() },
                 FieldTable::default(),
             )
             .await
@@ -268,17 +258,14 @@ impl RabbitmqConsumer {
 /// Registered in the engine's queue map when [queues.*] type = "rabbitmq".
 /// Holds the producer and a shutdown sender for the consumer task.
 pub struct RabbitmqQueue {
-    pub producer: RabbitmqProducer,
-    pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    pub producer:      RabbitmqProducer,
+    pub shutdown_tx:   Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl RabbitmqQueue {
     pub async fn connect(config: RabbitmqConfig) -> Result<Self> {
         let producer = RabbitmqProducer::connect(config).await?;
-        Ok(Self {
-            producer,
-            shutdown_tx: None,
-        })
+        Ok(Self { producer, shutdown_tx: None })
     }
 
     /// Signal the consumer task to stop gracefully.

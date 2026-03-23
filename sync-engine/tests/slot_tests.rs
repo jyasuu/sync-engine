@@ -43,22 +43,16 @@ async fn test_window_scope_cleared() {
 #[tokio::test]
 async fn test_job_scope_cleared_not_pipeline() {
     let mut map = SlotMap::new();
-    map.declare("job_data", SlotScope::Job);
+    map.declare("job_data",      SlotScope::Job);
     map.declare("pipeline_data", SlotScope::Pipeline);
-    map.write("job_data", "job_value").await.unwrap();
+    map.write("job_data",      "job_value").await.unwrap();
     map.write("pipeline_data", "pipeline_value").await.unwrap();
 
     // Simulate tick reset (clears job, keeps pipeline)
     map.clear_scope(SlotScope::Job).await;
 
-    assert!(
-        !map.is_set("job_data"),
-        "job slot should be cleared between ticks"
-    );
-    assert!(
-        map.is_set("pipeline_data"),
-        "pipeline slot should survive across ticks"
-    );
+    assert!(!map.is_set("job_data"),       "job slot should be cleared between ticks");
+    assert!(map.is_set("pipeline_data"),   "pipeline slot should survive across ticks");
     let v: &str = map.read("pipeline_data").await.unwrap();
     assert_eq!(v, "pipeline_value");
 }
@@ -77,20 +71,14 @@ async fn test_slot_type_mismatch_error() {
 async fn test_undeclared_slot_error() {
     let map = SlotMap::new();
     let result: Result<u32, _> = map.read("ghost").await;
-    assert!(
-        result.is_err(),
-        "reading undeclared slot should return error"
-    );
+    assert!(result.is_err(), "reading undeclared slot should return error");
 }
 
 #[tokio::test]
 async fn test_slot_is_set() {
     let mut map = SlotMap::new();
     map.declare("x", SlotScope::Window);
-    assert!(
-        !map.is_set("x"),
-        "declared but unwritten slot should not be set"
-    );
+    assert!(!map.is_set("x"), "declared but unwritten slot should not be set");
     map.write("x", true).await.unwrap();
     assert!(map.is_set("x"), "written slot should be set");
 }

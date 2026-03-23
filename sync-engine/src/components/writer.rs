@@ -1,4 +1,5 @@
-// sync-engine/src/components/writer.rs
+// sync-engine/src/components/writer.rs — requires feature "postgres"
+#![cfg(feature = "postgres")]
 use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::{postgres::PgPoolOptions, PgPool};
@@ -28,7 +29,7 @@ pub trait UpsertableInTx: Send + Sync + 'static {
 // ── PostgresWriter (pool-based) ───────────────────────────────────────────
 
 pub struct PostgresWriter<T> {
-    pool: PgPool,
+    pool:     PgPool,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -38,10 +39,7 @@ impl<T: Upsertable> PostgresWriter<T> {
             .max_connections(5)
             .connect(database_url)
             .await?;
-        Ok(Self {
-            pool,
-            _phantom: std::marker::PhantomData,
-        })
+        Ok(Self { pool, _phantom: std::marker::PhantomData })
     }
 }
 
@@ -69,19 +67,16 @@ pub struct TxWriter<T> {
 
 impl<T: UpsertableInTx> TxWriter<T> {
     pub fn new(pool: PgPool) -> Self {
-        Self {
-            pool,
-            _phantom: std::marker::PhantomData,
-        }
+        Self { pool, _phantom: std::marker::PhantomData }
     }
 
     pub async fn write_batch(&self, items: &[T]) -> Result<(usize, usize)> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx       = self.pool.begin().await?;
         let mut upserted = 0usize;
-        let mut skipped = 0usize;
+        let mut skipped  = 0usize;
         for item in items {
             match item.upsert_in_tx(&mut tx).await {
-                Ok(_) => upserted += 1,
+                Ok(_)  => upserted += 1,
                 Err(e) => {
                     error!(error = %e, "Upsert skipped");
                     skipped += 1;
@@ -113,7 +108,7 @@ impl<T: Upsertable> AnyWriter for WriterAdapter<T> {
 
 pub struct RawSqlHook {
     pub pool: PgPool,
-    pub sql: String,
+    pub sql:  String,
 }
 
 impl RawSqlHook {

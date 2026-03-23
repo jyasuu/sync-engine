@@ -18,7 +18,7 @@ use crate::step::Step;
 use crate::transport::rabbitmq::RabbitmqQueue;
 
 pub struct RabbitmqSendStep<T> {
-    pub reads: String,
+    pub reads:      String,
     pub queue_name: String,
     _phantom: PhantomData<T>,
 }
@@ -26,9 +26,9 @@ pub struct RabbitmqSendStep<T> {
 impl<T> RabbitmqSendStep<T> {
     pub fn new(reads: impl Into<String>, queue_name: impl Into<String>) -> Self {
         Self {
-            reads: reads.into(),
+            reads:      reads.into(),
             queue_name: queue_name.into(),
-            _phantom: PhantomData,
+            _phantom:   PhantomData,
         }
     }
 }
@@ -38,9 +38,7 @@ impl<T> Step for RabbitmqSendStep<T>
 where
     T: Any + Send + Sync + Clone + Serialize + 'static,
 {
-    fn name(&self) -> &str {
-        "rmq_publish"
-    }
+    fn name(&self) -> &str { "rmq_publish" }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
         let items: Vec<T> = ctx.slot_read(&self.reads).await?;

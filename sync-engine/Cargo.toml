@@ -7,6 +7,17 @@ edition = "2021"
 name = "sync_engine"
 path = "src/lib.rs"
 
+# ── Feature flags ──────────────────────────────────────────────────────────
+[features]
+default  = ["postgres", "rabbitmq"]
+
+# Sink / source backends
+postgres = ["dep:sqlx"]
+rabbitmq = ["dep:lapin", "dep:futures-lite"]
+csv      = ["dep:csv", "dep:tokio-util"]
+excel    = ["dep:calamine", "dep:rust_xlsxwriter"]
+
+# ── Runtime dependencies ───────────────────────────────────────────────────
 [dependencies]
 tokio                = { version = "1",    features = ["full"] }
 tokio-cron-scheduler = "0.13"
@@ -14,14 +25,20 @@ async-trait          = "0.1"
 reqwest              = { version = "0.12", features = ["json"] }
 serde                = { version = "1",    features = ["derive"] }
 serde_json           = "1"
-sqlx                 = { version = "0.8",  features = ["runtime-tokio", "postgres", "chrono"] }
 chrono               = { version = "0.4",  features = ["serde"] }
 toml                 = "0.8"
 anyhow               = "1"
 backon               = "1"
 tracing              = "0.1"
-lapin                = "2"
-futures-lite         = "2"
+
+# Feature-gated backends
+sqlx         = { version = "0.8",  features = ["runtime-tokio", "postgres", "chrono"], optional = true }
+lapin        = { version = "2",    optional = true }
+futures-lite = { version = "2",    optional = true }
+csv          = { version = "1",    optional = true }
+tokio-util   = { version = "0.7",  features = ["io"], optional = true }
+calamine     = { version = "0.24", optional = true }
+rust_xlsxwriter = { version = "0.75", optional = true }
 
 [build-dependencies]
 toml  = "0.8"

@@ -9,9 +9,7 @@ pub struct FetchParams {
 }
 
 impl FetchParams {
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
     pub fn with(mut self, k: impl Into<String>, v: impl Into<String>) -> Self {
         self.query.insert(k.into(), v.into());
         self

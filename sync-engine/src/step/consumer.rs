@@ -1,13 +1,4 @@
 // sync-engine/src/step/consumer.rs
-//
-// SpawnConsumerStep runs in pre_job. It:
-//   1. Takes the receiver side of a named queue.
-//   2. Spawns a tokio task that processes items as they arrive.
-//   3. commit_mode controls when the task commits to Postgres:
-//        PerBatch      — one tx per received batch (safer)
-//        DrainInPostJob — accumulates; the post_job DrainQueueStep commits
-//
-// The spawned handle is stored in ctx so post_job can await it.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -15,6 +6,7 @@ use std::marker::PhantomData;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
+#[cfg(feature = "postgres")]
 use crate::components::writer::UpsertableInTx;
 use crate::context::JobContext;
 use crate::slot::SlotScope;
@@ -34,65 +26,68 @@ pub enum CommitMode {
 
 /// Stored in a job-scoped slot so post_job can await the task.
 pub struct ConsumerHandle {
-    pub handle: JoinHandle<()>,
+    pub handle:     JoinHandle<()>,
     pub queue_name: String,
 }
 
-// ── SpawnConsumerStep ─────────────────────────────────────────────────────
+// ── SpawnConsumerStep — requires feature "postgres" ───────────────────────
 
+#[cfg(feature = "postgres")]
 pub struct SpawnConsumerStep<T>
 where
     T: UpsertableInTx + Send + Sync + Clone + 'static,
 {
-    pub queue: String,
+    pub queue:       String,
     pub commit_mode: CommitMode,
-    /// Job-scoped slot to accumulate into when commit_mode = DrainInPostJob.
-    pub accum_slot: Option<String>,
+    pub accum_slot:  Option<String>,
     _phantom: PhantomData<T>,
 }
 
+#[cfg(feature = "postgres")]
 impl<T> SpawnConsumerStep<T>
 where
     T: UpsertableInTx + Send + Sync + Clone + 'static,
 {
     pub fn per_batch(queue: impl Into<String>) -> Self {
         Self {
-            queue: queue.into(),
+            queue:       queue.into(),
             commit_mode: CommitMode::PerBatch,
-            accum_slot: None,
-            _phantom: PhantomData,
+            accum_slot:  None,
+            _phantom:    PhantomData,
         }
     }
 
-    pub fn drain_in_post_job(queue: impl Into<String>, accum_slot: impl Into<String>) -> Self {
+    pub fn drain_in_post_job(
+        queue:      impl Into<String>,
+        accum_slot: impl Into<String>,
+    ) -> Self {
         Self {
-            queue: queue.into(),
+            queue:       queue.into(),
             commit_mode: CommitMode::DrainInPostJob,
-            accum_slot: Some(accum_slot.into()),
-            _phantom: PhantomData,
+            accum_slot:  Some(accum_slot.into()),
+            _phantom:    PhantomData,
         }
     }
 }
 
+#[cfg(feature = "postgres")]
 #[async_trait]
 impl<T> Step for SpawnConsumerStep<T>
 where
     T: UpsertableInTx + std::any::Any + Send + Sync + Clone + 'static,
 {
-    fn name(&self) -> &str {
-        "spawn_consumer"
-    }
+    fn name(&self) -> &str { "spawn_consumer" }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
         let queue_entry = ctx.get_queue(&self.queue).await?;
-        let mut rx = queue_entry
+        let mut rx      = queue_entry
             .take_rx()
             .await
             .context("Consumer already spawned for this queue")?;
 
-        let db = ctx.connections.db.clone();
+        let db          = ctx.connections.db.clone();
         let commit_mode = self.commit_mode;
-        let queue_name = self.queue.clone();
+        let queue_name  = self.queue.clone();
 
         // For DrainInPostJob mode we need to send accumulated items back to
         // a job-scoped slot. We do this by storing them on the task's stack
@@ -106,12 +101,12 @@ where
 
         let handle = tokio::spawn(async move {
             let mut total_upserted = 0usize;
-            let mut total_skipped = 0usize;
+            let mut total_skipped  = 0usize;
             let mut accumulated: Vec<T> = Vec::new();
 
             while let Some(boxed) = rx.recv().await {
                 let item = match boxed.downcast::<T>() {
-                    Ok(v) => *v,
+                    Ok(v)  => *v,
                     Err(_) => {
                         error!(queue = %queue_name, "Type mismatch in queue — item skipped");
                         continue;
@@ -119,22 +114,26 @@ where
                 };
 
                 match commit_mode {
-                    CommitMode::PerBatch => match db.begin().await {
-                        Ok(mut tx) => match item.upsert_in_tx(&mut tx).await {
-                            Ok(_) => {
-                                let _ = tx.commit().await;
-                                total_upserted += 1;
+                    CommitMode::PerBatch => {
+                        match db.begin().await {
+                            Ok(mut tx) => {
+                                match item.upsert_in_tx(&mut tx).await {
+                                    Ok(_) => {
+                                        let _ = tx.commit().await;
+                                        total_upserted += 1;
+                                    }
+                                    Err(e) => {
+                                        error!(error = %e, "Consumer upsert skipped");
+                                        total_skipped += 1;
+                                    }
+                                }
                             }
                             Err(e) => {
-                                error!(error = %e, "Consumer upsert skipped");
+                                error!(error = %e, "Consumer: begin tx failed");
                                 total_skipped += 1;
                             }
-                        },
-                        Err(e) => {
-                            error!(error = %e, "Consumer: begin tx failed");
-                            total_skipped += 1;
                         }
-                    },
+                    }
                     CommitMode::DrainInPostJob => {
                         accumulated.push(item);
                     }

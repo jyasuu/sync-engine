@@ -8,6 +8,7 @@ pub mod pipeline;
 pub mod pipeline_runner;
 pub mod registry;
 pub mod runner;
+pub mod sinks;
 pub mod slot;
 pub mod standard_job;
 pub mod step;
@@ -21,41 +22,56 @@ pub use components::{
     auth::OAuth2Auth,
     chunker::DateWindowChunker,
     fetcher::{HasEnvelope, HttpJsonFetcher},
-    writer::{
-        NoopHook, PostgresWriter, RawSqlHook, TxWriter, Upsertable, UpsertableInTx, WriterAdapter,
-    },
+};
+#[cfg(feature = "postgres")]
+pub use components::writer::{
+    NoopHook, PostgresWriter, RawSqlHook, TxWriter,
+    Upsertable, UpsertableInTx, WriterAdapter,
 };
 
-// ── Job traits (kept for backwards compat) ────────────────────────────────
-pub use job::{
-    run_job, with_retry, Connections, DateWindowIter, JobSummary, MainJob, PostJob, PreJob,
-};
+// ── Job traits ────────────────────────────────────────────────────────────
+pub use job::{run_job, with_retry, DateWindowIter, JobSummary, MainJob, PostJob, PreJob};
+#[cfg(feature = "postgres")]
+pub use job::Connections;
 
-// ── New step system ───────────────────────────────────────────────────────
+// ── Step system ───────────────────────────────────────────────────────────
 pub use config_value::{ConfigValue, EnvRef};
 pub use context::{Connections as JobConnections, JobContext, WindowMeta};
 pub use runner::{MainJobRunner, WindowConfig};
 pub use slot::{SlotMap, SlotScope};
-pub use step::consumer::{CommitMode, ConsumerHandle, SpawnConsumerStep};
+pub use step::Step;
+pub use step::consumer::{CommitMode, ConsumerHandle};
+#[cfg(feature = "postgres")]
+pub use step::consumer::SpawnConsumerStep;
 pub use step::control::{DrainQueueStep, LogSummaryStep, RawSqlStep, SleepStep};
 pub use step::fetch::FetchJsonStep;
 pub use step::setup::{DeclareSlotStep, RegisterQueueStep};
-pub use step::sink::{SendToQueueStep, TxUpsertStep};
+pub use step::sink::SendToQueueStep;
+#[cfg(feature = "postgres")]
+pub use step::sink::TxUpsertStep;
 pub use step::transform::TransformStep;
-pub use step::Step;
+
+// ── File sinks ────────────────────────────────────────────────────────────
+pub use sinks::FileSink;
+#[cfg(feature = "csv")]
+pub use sinks::CsvSink;
+#[cfg(feature = "excel")]
+pub use sinks::ExcelSink;
 
 // ── Transport ─────────────────────────────────────────────────────────────
+#[cfg(feature = "rabbitmq")]
 pub use transport::{RabbitmqConfig, RabbitmqConsumer, RabbitmqProducer, RabbitmqQueue};
 
 // ── TypeRegistry + run() entry-point ─────────────────────────────────────
-pub use pipeline_runner::{
-    build_context, build_steps, build_window_cfg, run, validate, IteratorConfig, MainJobConfig,
-    MainStepConfig, PipelineConfig, PostJobConfig, PostStepConfig, PreJobConfig, QueueDef,
-    ResourceDef, RetryConfig, SchedulerConfig, SlotDef, SlotScopeStr,
-};
 pub use registry::TypeRegistry;
+pub use pipeline_runner::{
+    run, validate, build_context, build_window_cfg, build_steps,
+    PipelineConfig, ResourceDef, SlotDef, SlotScopeStr, QueueDef,
+    PreJobConfig, MainJobConfig, MainStepConfig, IteratorConfig, RetryConfig,
+    PostJobConfig, PostStepConfig, SchedulerConfig,
+};
 
-// ── StandardJob (kept for backwards compat) ───────────────────────────────
+// ── StandardJob (legacy) ──────────────────────────────────────────────────
 pub use standard_job::{HasConnections, HasIteratorCfg, HasRetryCfg, StandardJob};
 
 // ── Pipeline primitives ───────────────────────────────────────────────────

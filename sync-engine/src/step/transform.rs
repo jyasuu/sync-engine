@@ -16,11 +16,11 @@ pub struct TransformStep<Src, Dst, Xfm>
 where
     Xfm: Transform<Input = Src, Output = Dst>,
 {
-    pub reads: String,
+    pub reads:  String,
     pub writes: String,
     /// Append to an existing Vec rather than replace (for job-scope slots).
     pub append: bool,
-    pub xfm: Xfm,
+    pub xfm:    Xfm,
     _phantom: PhantomData<(Src, Dst)>,
 }
 
@@ -29,14 +29,14 @@ where
     Xfm: Transform<Input = Src, Output = Dst>,
 {
     pub fn new(
-        reads: impl Into<String>,
+        reads:  impl Into<String>,
         writes: impl Into<String>,
         append: bool,
-        xfm: Xfm,
+        xfm:    Xfm,
     ) -> Self {
         Self {
-            reads: reads.into(),
-            writes: writes.into(),
+            reads:   reads.into(),
+            writes:  writes.into(),
             append,
             xfm,
             _phantom: PhantomData,
@@ -51,9 +51,7 @@ where
     Dst: std::any::Any + Send + Sync + Clone + 'static,
     Xfm: Transform<Input = Src, Output = Dst> + Send + Sync,
 {
-    fn name(&self) -> &str {
-        "transform"
-    }
+    fn name(&self) -> &str { "transform" }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
         let items: Vec<Src> = ctx.slot_read(&self.reads).await?;
@@ -63,10 +61,7 @@ where
             .into_iter()
             .filter_map(|item| match self.xfm.apply(item) {
                 Ok(out) => Some(out),
-                Err(e) => {
-                    warn!(error = %e, "Transform skip");
-                    None
-                }
+                Err(e)  => { warn!(error = %e, "Transform skip"); None }
             })
             .collect();
 

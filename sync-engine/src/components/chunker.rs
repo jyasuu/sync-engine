@@ -7,19 +7,19 @@ use tracing::info;
 use crate::pipeline::primitives::{Chunker, FetchParams};
 
 pub struct DateWindowChunker {
-    cursor: i64,
-    end_interval: i64,
+    cursor:         i64,
+    end_interval:   i64,
     interval_limit: i64,
-    chunk_sleep: Duration,
-    first: bool,
+    chunk_sleep:    Duration,
+    first:          bool,
 }
 
 impl DateWindowChunker {
     pub fn new(
         start_interval: i64,
-        end_interval: i64,
+        end_interval:   i64,
         interval_limit: i64,
-        chunk_sleep: Duration,
+        chunk_sleep:    Duration,
     ) -> Self {
         Self {
             cursor: start_interval,
@@ -42,9 +42,9 @@ impl Chunker for DateWindowChunker {
             tokio::time::sleep(self.chunk_sleep).await;
         }
         self.first = false;
-        let now = Utc::now();
+        let now        = Utc::now();
         let window_end = (self.cursor - self.interval_limit).max(self.end_interval);
-        let start_str = (now - chrono::Duration::days(self.cursor))
+        let start_str  = (now - chrono::Duration::days(self.cursor))
             .format("%Y%m%d")
             .to_string();
         let end_str = (now - chrono::Duration::days(window_end))
@@ -55,7 +55,7 @@ impl Chunker for DateWindowChunker {
         Some(
             FetchParams::new()
                 .with("start_time", start_str)
-                .with("end_time", end_str),
+                .with("end_time",   end_str),
         )
     }
 }

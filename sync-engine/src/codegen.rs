@@ -256,7 +256,11 @@ fn gen_upsert(record_name: &str, hint: &SinkHint, fields: &[FieldDef]) -> String
 
     // Transaction-based impl — used by TxWriter (new)
     writeln!(out, "#[async_trait::async_trait]").unwrap();
-    writeln!(out, "impl sync_engine::UpsertableInTx for {record_name} {{").unwrap();
+    writeln!(
+        out,
+        "impl sync_engine::UpsertableInTx for {record_name} {{"
+    )
+    .unwrap();
     writeln!(
         out,
         "    async fn upsert_in_tx(&self, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> anyhow::Result<()> {{"
@@ -325,15 +329,16 @@ pub fn generate(schema_path: impl AsRef<Path>) {
     let path = schema_path.as_ref();
     println!("cargo:rerun-if-changed={}", path.display());
 
-    let raw = fs::read_to_string(path).unwrap_or_else(|_| panic!("Cannot read {}", path.display()));
+    let raw = fs::read_to_string(path)
+        .unwrap_or_else(|_| panic!("Cannot read {}", path.display()));
     let schema: Schema =
         toml::from_str(&raw).unwrap_or_else(|e| panic!("Cannot parse {}: {e}", path.display()));
 
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
-    let mut records = String::from("// @generated\n\n");
+    let mut records   = String::from("// @generated\n\n");
     let mut envelopes = String::from("// @generated\n\n");
-    let mut upserts = String::from("// @generated\n\n");
+    let mut upserts   = String::from("// @generated\n\n");
     let mut transforms = String::from("// @generated\n\n");
 
     for (name, def) in &schema.record {
@@ -353,9 +358,9 @@ pub fn generate(schema_path: impl AsRef<Path>) {
         transforms.push('\n');
     }
 
-    fs::write(out.join("records.rs"), &records).unwrap();
+    fs::write(out.join("records.rs"),   &records).unwrap();
     fs::write(out.join("envelopes.rs"), &envelopes).unwrap();
-    fs::write(out.join("upserts.rs"), &upserts).unwrap();
+    fs::write(out.join("upserts.rs"),   &upserts).unwrap();
     fs::write(out.join("transforms.rs"), &transforms).unwrap();
 }
 
@@ -375,9 +380,12 @@ pub fn generate(schema_path: impl AsRef<Path>) {
 ///     sync_engine::codegen::generate_config_doc("config.toml", "schema.toml", "CONFIG.md");
 /// }
 /// ```
-pub fn generate_pipeline_skeleton(schema_path: impl AsRef<Path>, out_path: impl AsRef<Path>) {
+pub fn generate_pipeline_skeleton(
+    schema_path: impl AsRef<Path>,
+    out_path: impl AsRef<Path>,
+) {
     let schema_path = schema_path.as_ref();
-    let out_path = out_path.as_ref();
+    let out_path    = out_path.as_ref();
 
     println!("cargo:rerun-if-changed={}", schema_path.display());
 
@@ -392,15 +400,15 @@ pub fn generate_pipeline_skeleton(schema_path: impl AsRef<Path>, out_path: impl 
         .unwrap_or_else(|e| panic!("Cannot parse {}: {e}", schema_path.display()));
 
     // Find the envelope, transform, and model type names from schema
-    let mut envelope_name = String::from("ApiResponse");
-    let mut api_record = String::from("ApiRecord");
-    let mut db_record = String::from("DbRecord");
+    let mut envelope_name  = String::from("ApiResponse");
+    let mut api_record     = String::from("ApiRecord");
+    let mut db_record      = String::from("DbRecord");
     let mut transform_name = String::from("RecordTransform");
-    let mut db_table = String::from("records");
+    let mut db_table       = String::from("records");
 
     for (name, def) in &schema.record {
         if def.fetcher.is_some() {
-            api_record = name.clone();
+            api_record    = name.clone();
             envelope_name = format!("{name}Response");
         }
         if def.sink.is_some() {
@@ -430,35 +438,23 @@ pub fn generate_pipeline_skeleton(schema_path: impl AsRef<Path>, out_path: impl 
     doc.push_str(&db_table.replace('_', "-"));
     doc.push_str("\"\n\n[job.scheduler]\ncron = { env = \"SCHEDULER__CRON\", default = \"0 */30 * * * *\" }\n\n");
 
-    doc.push_str(
-        "# ── Resources ─────────────────────────────────────────────────────────────\n\n",
-    );
+    doc.push_str("# ── Resources ─────────────────────────────────────────────────────────────\n\n");
     doc.push_str("[resources.pg]\ntype            = \"postgres\"\nurl             = { env = \"SINK__DATABASE_URL\" }\nmax_connections = 5\n\n");
     doc.push_str("[resources.auth]\ntype          = \"oauth2\"\ntoken_url     = { env = \"AUTH__TOKEN_URL\" }\nclient_id     = { env = \"AUTH__CLIENT_ID\" }\nclient_secret = { env = \"AUTH__CLIENT_SECRET\" }\n\n");
     doc.push_str("[resources.http]\ntype           = \"http_client\"\ntimeout_secs   = 620\nkeepalive_secs = 30\n\n");
     doc.push_str("[resources.svc]\ntype         = \"http_service\"\nhttp         = \"http\"\nauth         = \"auth\"\nendpoint     = { env = \"SOURCE__ENDPOINT\" }\nrealm_type   = { env = \"SOURCE__REALM_TYPE\", default = \"\" }\n# start_param = \"start_time\"   # default — override for APIs using different param names\n# end_param   = \"end_time\"     # default\n# date_format = \"%Y%m%d\"       # default — e.g. \"%Y-%m-%d\" or \"%Y-%m-%dT00:00:00Z\"\n# [[resources.svc.extra_params]]\n# key   = \"api_version\"\n# value = { env = \"SOURCE__API_VERSION\", default = \"v2\" }\n\n");
 
     doc.push_str("# ── Slots ─────────────────────────────────────────────────────────────────\n");
-    doc.push_str(
-        "# scope = \"window\" (case 1/3/4) or \"job\" (case 2: accumulate across windows)\n\n",
-    );
-    doc.push_str(&format!(
-        "[slots.api_rows]\ntype  = \"{api_record}\"\nscope = \"window\"\n\n"
-    ));
-    doc.push_str(&format!(
-        "[slots.db_rows]\ntype  = \"{db_record}\"\nscope = \"window\"\n\n"
-    ));
+    doc.push_str("# scope = \"window\" (case 1/3/4) or \"job\" (case 2: accumulate across windows)\n\n");
+    doc.push_str(&format!("[slots.api_rows]\ntype  = \"{api_record}\"\nscope = \"window\"\n\n"));
+    doc.push_str(&format!("[slots.db_rows]\ntype  = \"{db_record}\"\nscope = \"window\"\n\n"));
 
-    doc.push_str(
-        "# ── Pre-job ───────────────────────────────────────────────────────────────\n\n",
-    );
+    doc.push_str("# ── Pre-job ───────────────────────────────────────────────────────────────\n\n");
     doc.push_str("[pre_job]\ninit_resources = true\n\n");
     doc.push_str("# Case 3/4 — uncomment to spawn async consumer:\n");
     doc.push_str(&format!("# [[pre_job.steps]]\n# type        = \"spawn_consumer\"\n# queue       = \"db_rows\"\n# model       = \"{db_record}\"\n# commit_mode = \"per_batch\"\n\n"));
 
-    doc.push_str(
-        "# ── Main job ──────────────────────────────────────────────────────────────\n\n",
-    );
+    doc.push_str("# ── Main job ──────────────────────────────────────────────────────────────\n\n");
     doc.push_str("[main_job.iterator]\ntype           = \"date_window\"\nstart_interval = { env = \"SOURCE__START_INTERVAL\",    default = \"30\" }\nend_interval   = { env = \"SOURCE__END_INTERVAL\",      default = \"0\" }\ninterval_limit = { env = \"SOURCE__INTERVAL_LIMIT\",    default = \"7\" }\nsleep_secs     = { env = \"SOURCE__WINDOW_SLEEP_SECS\", default = \"60\" }\n\n");
     doc.push_str("[main_job.retry]\nmax_attempts = 5\nbackoff_secs = 2\n\n");
 
@@ -477,9 +473,7 @@ pub fn generate_pipeline_skeleton(schema_path: impl AsRef<Path>, out_path: impl 
          # [[main_job.post_loop_steps]]\n# type  = \"tx_upsert\"\n# model = \"{db_record}\"\n# reads = \"db_rows\"\n\n"
     ));
 
-    doc.push_str(
-        "# ── Post-job ──────────────────────────────────────────────────────────────\n\n",
-    );
+    doc.push_str("# ── Post-job ──────────────────────────────────────────────────────────────\n\n");
     doc.push_str("[[post_job.steps]]\ntype = \"log_summary\"\n\n");
     doc.push_str("[[post_job.steps]]\ntype          = \"raw_sql\"\nsql           = { env = \"SINK__SYNC_SQL\", default = \"\" }\nskip_if_empty = true\n\n");
     doc.push_str("# Case 3/4: drain queue before summary:\n# [[post_job.steps]]\n# type  = \"drain_queue\"\n# queue = \"db_rows\"\n\n");
@@ -497,7 +491,7 @@ pub fn generate_config_doc(
 ) {
     let config_path = config_path.as_ref();
     let schema_path = schema_path.as_ref();
-    let out_path = out_path.as_ref();
+    let out_path    = out_path.as_ref();
 
     println!("cargo:rerun-if-changed={}", config_path.display());
     println!("cargo:rerun-if-changed={}", schema_path.display());
@@ -515,9 +509,7 @@ pub fn generate_config_doc(
 
     let mut doc = String::new();
     doc.push_str("# Configuration reference\n\n");
-    doc.push_str(
-        "> Generated from `config.toml` and `schema.toml` — do not edit this file directly.\n",
-    );
+    doc.push_str("> Generated from `config.toml` and `schema.toml` — do not edit this file directly.\n");
     doc.push_str(">\n");
     doc.push_str("> **Override any value** with an environment variable using `__` as the section separator:  \n");
     doc.push_str("> `AUTH__CLIENT_SECRET=prod-secret` overrides `[auth] client_secret`\n\n");
@@ -538,9 +530,9 @@ pub fn generate_config_doc(
                     .collect();
 
                 for key in keys {
-                    let val = &fields[key];
+                    let val     = &fields[key];
                     let default = toml_value_display(val);
-                    let desc = fields
+                    let desc    = fields
                         .get(&format!("{key}__desc"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
@@ -562,28 +554,16 @@ pub fn generate_config_doc(
     doc.push_str("---\n\n");
     doc.push_str("## Schema (`schema.toml`)\n\n");
     doc.push_str("Defines the API record shape, DB target shape, and field mapping rules.  \n");
-    doc.push_str(
-        "`build.rs` generates all Rust structs and trait implementations from this file.\n\n",
-    );
+    doc.push_str("`build.rs` generates all Rust structs and trait implementations from this file.\n\n");
 
     for (record_name, def) in &schema.record {
-        let kind = if def.fetcher.is_some() {
-            "API source record"
-        } else {
-            "DB target record"
-        };
+        let kind = if def.fetcher.is_some() { "API source record" } else { "DB target record" };
         doc.push_str(&format!("### `[record.{record_name}]`  _{kind}_\n\n"));
         if let Some(ref fh) = def.fetcher {
-            doc.push_str(&format!(
-                "Response envelope field: `{}`  \n",
-                fh.envelope_field
-            ));
+            doc.push_str(&format!("Response envelope field: `{}`  \n", fh.envelope_field));
             if !fh.envelope_meta.is_empty() {
                 let names: Vec<&str> = fh.envelope_meta.iter().map(|m| m.name.as_str()).collect();
-                doc.push_str(&format!(
-                    "Envelope metadata fields: {}  \n",
-                    names.join(", ")
-                ));
+                doc.push_str(&format!("Envelope metadata fields: {}  \n", names.join(", ")));
             }
             doc.push('\n');
         }
@@ -607,9 +587,7 @@ pub fn generate_config_doc(
     doc.push_str("| `copy` | any | same type | Direct field copy |\n");
     doc.push_str("| `null_to_empty` | `Option<String>` | `String` | `None` → `\"\"` |\n");
     doc.push_str("| `bool_to_yn` | `bool` | `String` | `true` → `\"Y\"`, `false` → `\"N\"` |\n");
-    doc.push_str(
-        "| `epoch_ms_to_ts` | `i64` / `Option<i64>` | `DateTime<Utc>` | Epoch ms → timestamp |\n",
-    );
+    doc.push_str("| `epoch_ms_to_ts` | `i64` / `Option<i64>` | `DateTime<Utc>` | Epoch ms → timestamp |\n");
     doc.push_str("| `to_string` | any `Display` | `String` | `.to_string()` |\n\n");
 
     for (mapping_name, mapping) in &schema.mapping {
@@ -632,16 +610,10 @@ pub fn generate_config_doc(
 
 fn toml_value_display(v: &toml::Value) -> String {
     match v {
-        toml::Value::String(s) => {
-            if s.is_empty() {
-                "\"\"".into()
-            } else {
-                s.clone()
-            }
-        }
+        toml::Value::String(s)  => if s.is_empty() { "\"\"".into() } else { s.clone() },
         toml::Value::Integer(n) => n.to_string(),
-        toml::Value::Float(f) => f.to_string(),
+        toml::Value::Float(f)   => f.to_string(),
         toml::Value::Boolean(b) => b.to_string(),
-        _ => "—".into(),
+        _                       => "—".into(),
     }
 }
