@@ -1,14 +1,25 @@
-# case1-tx-per-window.toml
+# case8-autocommit.toml
 #
-# Pattern: fetch → transform → commit, one Postgres transaction per window.
-# Simplest and safest. Each window is independent — failure retries only
-# that window; all previous windows are already durable.
+# Pattern: each row committed in its own transaction (autocommit strategy).
+# Structurally identical to case 1 — only commit_strategy on tx_upsert changes.
 #
-# main.rs:
-#   registry.register_envelope::<ApiUserResponse>("ApiUserResponse");
-#   registry.register_transform::<ApiUser, DbUser, UserTransform>("UserTransform");
-#   registry.register_model::<DbUser>("DbUser");
-#   sync_engine::run("pipeline.toml", registry).await
+# Trade-offs vs case 1 (tx_scope):
+#   + A single bad row never rolls back the rest of the window
+#   + No long-held transaction lock on the target table
+#   + Memory-friendly: rows don't accumulate in the tx buffer
+#   - More Postgres round-trips (one BEGIN/COMMIT per row)
+#   - No window-level atomicity: partial windows are visible if the job fails
+#   - Slower for small rows at high volume (transaction overhead per row)
+#
+# Best for:
+#   - Large windows where partial success is acceptable
+#   - Tables with constraints that may reject individual rows
+#   - When the target table is frequently read during the sync
+#
+# Changed from case 1:
+#   tx_upsert   commit_strategy = "autocommit"   (was implicit "tx_scope")
+#
+# main.rs — unchanged from case 1.
 
 [job]
 name = "user-sync"
@@ -17,7 +28,7 @@ name = "user-sync"
 type = "cron"
 cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
 
-# ── Resources — identical in all four cases ───────────────────────────────
+# ── Resources — identical in all cases ───────────────────────────────────
 
 [resources.pg]
 type            = "postgres"
@@ -36,16 +47,13 @@ timeout_secs   = 620
 keepalive_secs = 30
 
 [resources.svc]
-type         = "http_service"
-http         = "http"
-auth         = "auth"
-endpoint     = { env = "SOURCE__USER_ENDPOINT" }
-realm_type   = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
-# start_param = "start_time"   # default — override for APIs using different names
-# end_param   = "end_time"     # default
-# date_format = "%Y%m%d"       # default — e.g. "%Y-%m-%d" or "%s" for unix timestamp
+type       = "http_service"
+http       = "http"
+auth       = "auth"
+endpoint   = { env = "SOURCE__USER_ENDPOINT" }
+realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
 
-# ── Slots — window scope: cleared before each retry attempt ───────────────
+# ── Slots ─────────────────────────────────────────────────────────────────
 
 [slots.api_rows]
 type  = "ApiUser"
@@ -53,7 +61,7 @@ scope = "window"
 
 [slots.db_rows]
 type  = "DbUser"
-scope = "window"    # KEY: window = cleared every retry; tx commits inside loop
+scope = "window"
 
 # ── Pre-job ───────────────────────────────────────────────────────────────
 
@@ -86,14 +94,12 @@ reads     = "api_rows"
 writes    = "db_rows"
 append    = false
 
+# KEY: each row committed independently — failed rows are skipped, rest continue
 [[main_job.retry_steps]]
-type  = "tx_upsert"     # commit happens here, inside the retry loop
-model = "DbUser"
-reads = "db_rows"
-
-[[main_job.post_window_steps]]
-type = "sleep"
-secs = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
+type            = "tx_upsert"
+model           = "DbUser"
+reads           = "db_rows"
+commit_strategy = "autocommit"
 
 # ── Post-job ──────────────────────────────────────────────────────────────
 
@@ -104,7 +110,3 @@ type = "log_summary"
 type          = "raw_sql"
 sql           = { env = "SINK__SYNC_SQL", default = "" }
 skip_if_empty = true
-
-[[post_job.steps]]
-type = "custom"
-hook = "UserSyncSummary"    # optional: register in main.rs or remove this step

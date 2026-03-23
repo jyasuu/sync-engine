@@ -1,23 +1,42 @@
-# case1-tx-per-window.toml
+# case7-trigger-pg-notify.toml
 #
-# Pattern: fetch → transform → commit, one Postgres transaction per window.
-# Simplest and safest. Each window is independent — failure retries only
-# that window; all previous windows are already durable.
+# Pattern: Postgres LISTEN/NOTIFY fires a sync tick.
+# The engine issues LISTEN on the configured channel at startup and runs
+# one tick per NOTIFY received. Concurrent notifications while a tick is
+# running are mutex-skipped.
 #
-# main.rs:
-#   registry.register_envelope::<ApiUserResponse>("ApiUserResponse");
-#   registry.register_transform::<ApiUser, DbUser, UserTransform>("UserTransform");
-#   registry.register_model::<DbUser>("DbUser");
-#   sync_engine::run("pipeline.toml", registry).await
+# Use for:
+#   - Tight coupling to a Postgres-resident upstream (e.g. trigger after
+#     an INSERT/UPDATE in a source table)
+#   - Zero extra infrastructure — no RabbitMQ, no HTTP server needed
+#   - Row-level change notification from a Postgres trigger function
+#
+# Changed from case 1:
+#   [job.trigger]   type = "pg_notify"   (was type = "cron")
+#   No other changes — same pipeline, same resources.
+#
+# Fire a sync from psql:
+#   SELECT pg_notify('sync_trigger', '{}');
+#
+# Typical Postgres trigger to auto-notify on source table changes:
+#   CREATE OR REPLACE FUNCTION notify_sync() RETURNS trigger AS $$
+#   BEGIN PERFORM pg_notify('sync_trigger', '{}'); RETURN NEW; END;
+#   $$ LANGUAGE plpgsql;
+#   CREATE TRIGGER trg_sync AFTER INSERT OR UPDATE ON source_users
+#   FOR EACH STATEMENT EXECUTE FUNCTION notify_sync();
+#
+# main.rs — unchanged from case 1.
 
 [job]
 name = "user-sync"
 
+# KEY: block on LISTEN; each NOTIFY fires one tick
 [job.trigger]
-type = "cron"
-cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+type    = "pg_notify"
+channel = { env = "TRIGGER__PG_CHANNEL", default = "sync_trigger" }
 
-# ── Resources — identical in all four cases ───────────────────────────────
+# ── Resources — identical in all cases ───────────────────────────────────
+# Note: pg_notify reuses the same Postgres URL from [resources.pg].
 
 [resources.pg]
 type            = "postgres"
@@ -36,16 +55,13 @@ timeout_secs   = 620
 keepalive_secs = 30
 
 [resources.svc]
-type         = "http_service"
-http         = "http"
-auth         = "auth"
-endpoint     = { env = "SOURCE__USER_ENDPOINT" }
-realm_type   = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
-# start_param = "start_time"   # default — override for APIs using different names
-# end_param   = "end_time"     # default
-# date_format = "%Y%m%d"       # default — e.g. "%Y-%m-%d" or "%s" for unix timestamp
+type       = "http_service"
+http       = "http"
+auth       = "auth"
+endpoint   = { env = "SOURCE__USER_ENDPOINT" }
+realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
 
-# ── Slots — window scope: cleared before each retry attempt ───────────────
+# ── Slots ─────────────────────────────────────────────────────────────────
 
 [slots.api_rows]
 type  = "ApiUser"
@@ -53,7 +69,7 @@ scope = "window"
 
 [slots.db_rows]
 type  = "DbUser"
-scope = "window"    # KEY: window = cleared every retry; tx commits inside loop
+scope = "window"
 
 # ── Pre-job ───────────────────────────────────────────────────────────────
 
@@ -87,13 +103,9 @@ writes    = "db_rows"
 append    = false
 
 [[main_job.retry_steps]]
-type  = "tx_upsert"     # commit happens here, inside the retry loop
+type  = "tx_upsert"
 model = "DbUser"
 reads = "db_rows"
-
-[[main_job.post_window_steps]]
-type = "sleep"
-secs = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
 
 # ── Post-job ──────────────────────────────────────────────────────────────
 
@@ -104,7 +116,3 @@ type = "log_summary"
 type          = "raw_sql"
 sql           = { env = "SINK__SYNC_SQL", default = "" }
 skip_if_empty = true
-
-[[post_job.steps]]
-type = "custom"
-hook = "UserSyncSummary"    # optional: register in main.rs or remove this step

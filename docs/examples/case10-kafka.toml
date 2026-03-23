@@ -1,0 +1,219 @@
+# case10-kafka.toml
+#
+# Two sub-patterns in one file — uncomment the one you want.
+#
+# ── Sub-pattern A: Kafka as sink (produce) ────────────────────────────────
+# Fetch from HTTP API → transform → publish to Kafka topic.
+# A downstream consumer (another service or another sync job) reads and
+# writes to the final store.
+#
+# Trade-offs vs case 1 (direct Postgres write):
+#   + Decouples producer (this service) from consumer (Postgres writer)
+#   + Multiple independent consumers can subscribe (fan-out)
+#   + Natural buffer: producer runs at API speed, consumer at DB speed
+#   - Requires a running Kafka broker
+#   - At-least-once delivery — consumer must be idempotent
+#   - Adds end-to-end latency
+#
+# ── Sub-pattern B: Kafka as source (consume) ─────────────────────────────
+# Consume from a Kafka topic → transform → write to Postgres.
+# Another service (or the active half of sub-pattern A) is the producer.
+#
+# ── Sub-pattern C: Kafka as trigger ──────────────────────────────────────
+# Each Kafka message fires one full pipeline tick (fetch + transform + write).
+# Use when a message signals "new data available" rather than carrying the data.
+#
+# Cargo.toml requirement:
+#   sync-engine = { features = ["kafka"] }
+#
+# main.rs — unchanged from case 1 for sub-patterns A and C.
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SUB-PATTERN A — Kafka sink (produce)
+# Uncomment this block and comment out sub-pattern B/C below.
+# ═══════════════════════════════════════════════════════════════════════════
+
+[job]
+name = "user-sync"
+
+[job.trigger]
+type = "cron"
+cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+
+[resources.auth]
+type          = "oauth2"
+token_url     = { env = "AUTH__TOKEN_URL" }
+client_id     = { env = "AUTH__CLIENT_ID" }
+client_secret = { env = "AUTH__CLIENT_SECRET" }
+
+[resources.http]
+type           = "http_client"
+timeout_secs   = 620
+keepalive_secs = 30
+
+[resources.svc]
+type       = "http_service"
+http       = "http"
+auth       = "auth"
+endpoint   = { env = "SOURCE__USER_ENDPOINT" }
+realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
+
+# KEY: Kafka producer — no Postgres resource needed for sink-only pattern
+[resources.kafka]
+type     = "kafka"
+brokers  = { env = "KAFKA_BROKERS", default = "localhost:9092" }
+group_id = { env = "KAFKA_GROUP_ID", default = "user-sync" }
+
+[slots.api_rows]
+type  = "ApiUser"
+scope = "window"
+
+[slots.db_rows]
+type  = "DbUser"
+scope = "window"
+
+[pre_job]
+init_resources = true
+
+[main_job.iterator]
+type           = "date_window"
+start_interval = { env = "SOURCE__START_INTERVAL",    default = "30" }
+end_interval   = { env = "SOURCE__END_INTERVAL",      default = "0" }
+interval_limit = { env = "SOURCE__INTERVAL_LIMIT",    default = "7" }
+sleep_secs     = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
+
+[main_job.retry]
+max_attempts = 5
+backoff_secs = 2
+
+[[main_job.retry_steps]]
+type     = "fetch"
+envelope = "ApiUserResponse"
+writes   = "api_rows"
+append   = false
+
+[[main_job.retry_steps]]
+type      = "transform"
+transform = "UserTransform"
+reads     = "api_rows"
+writes    = "db_rows"
+append    = false
+
+# KEY: publish to Kafka instead of writing to Postgres
+[[main_job.retry_steps]]
+type      = "kafka_produce"
+model     = "DbUser"
+reads     = "db_rows"
+topic     = { env = "KAFKA_SINK_TOPIC", default = "user-sync.db-rows" }
+key_field = "pccuid"    # optional — uses pccuid as Kafka message key for ordering
+
+[[post_job.steps]]
+type = "log_summary"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SUB-PATTERN B — Kafka source (consume)
+# Replace the [job] block above with this to consume from Kafka instead.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# [job]
+# name = "user-sync"
+#
+# [job.trigger]
+# type = "cron"
+# cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+#
+# [resources.pg]
+# type            = "postgres"
+# url             = { env = "SINK__DATABASE_URL" }
+# max_connections = 5
+#
+# # KEY: Kafka consumer — reads from topic, transforms, writes to Postgres
+# [resources.kafka]
+# type     = "kafka"
+# brokers  = { env = "KAFKA_BROKERS", default = "localhost:9092" }
+# group_id = { env = "KAFKA_GROUP_ID", default = "user-sync-consumer" }
+# topic    = { env = "KAFKA_SOURCE_TOPIC", default = "user-sync.db-rows" }
+#
+# [slots.kafka_rows]
+# type  = "DbUser"
+# scope = "window"
+#
+# [slots.db_rows]
+# type  = "DbUser"
+# scope = "window"
+#
+# [pre_job]
+# init_resources = true
+#
+# [main_job.iterator]
+# type           = "date_window"
+# start_interval = { env = "SOURCE__START_INTERVAL",    default = "30" }
+# end_interval   = { env = "SOURCE__END_INTERVAL",      default = "0" }
+# interval_limit = { env = "SOURCE__INTERVAL_LIMIT",    default = "7" }
+# sleep_secs     = "0"    # consume doesn't need to sleep between windows
+#
+# [main_job.retry]
+# max_attempts = 3
+# backoff_secs = 1
+#
+# # KEY: consume a batch from Kafka instead of fetching from HTTP
+# [[main_job.retry_steps]]
+# type         = "kafka_consume"
+# model        = "DbUser"          # deserialized directly — no transform needed
+# writes       = "db_rows"
+# topic        = { env = "KAFKA_SOURCE_TOPIC", default = "user-sync.db-rows" }
+# max_messages = 500
+# timeout_ms   = 5000
+#
+# [[main_job.retry_steps]]
+# type  = "tx_upsert"
+# model = "DbUser"
+# reads = "db_rows"
+#
+# [[post_job.steps]]
+# type = "log_summary"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SUB-PATTERN C — Kafka trigger
+# Each Kafka message on TRIGGER__KAFKA_TOPIC fires one full pipeline tick.
+# The message payload is ignored — it's a signal, not the data.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# [job]
+# name = "user-sync"
+#
+# # KEY: each Kafka message fires one tick (fetch + transform + write)
+# [job.trigger]
+# type  = "kafka"
+# topic = { env = "TRIGGER__KAFKA_TOPIC", default = "user-sync.trigger" }
+#
+# [resources.pg]
+# type            = "postgres"
+# url             = { env = "SINK__DATABASE_URL" }
+# max_connections = 5
+#
+# [resources.auth]
+# type          = "oauth2"
+# token_url     = { env = "AUTH__TOKEN_URL" }
+# client_id     = { env = "AUTH__CLIENT_ID" }
+# client_secret = { env = "AUTH__CLIENT_SECRET" }
+#
+# [resources.http]
+# type           = "http_client"
+# timeout_secs   = 620
+# keepalive_secs = 30
+#
+# [resources.svc]
+# type       = "http_service"
+# http       = "http"
+# auth       = "auth"
+# endpoint   = { env = "SOURCE__USER_ENDPOINT" }
+# realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
+#
+# [resources.kafka]
+# type     = "kafka"
+# brokers  = { env = "KAFKA_BROKERS", default = "localhost:9092" }
+# group_id = { env = "KAFKA_GROUP_ID", default = "user-sync-trigger" }
+# topic    = { env = "TRIGGER__KAFKA_TOPIC", default = "user-sync.trigger" }
+#
+# ... (rest identical to case 1 — same slots, pre_job, main_job, post_job)

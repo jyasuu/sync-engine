@@ -1,8 +1,16 @@
-# case1-tx-per-window.toml
+# case5-trigger-once.toml
 #
-# Pattern: fetch → transform → commit, one Postgres transaction per window.
-# Simplest and safest. Each window is independent — failure retries only
-# that window; all previous windows are already durable.
+# Pattern: run a single tick then exit with code 0.
+# Identical pipeline to case 1 — only [job.trigger] changes.
+#
+# Use for:
+#   - CI jobs (run sync as part of a pipeline, fail build on error)
+#   - Kubernetes Jobs (one-shot pod, k8s handles restart policy)
+#   - Manual backfill (SOURCE__START_INTERVAL / END_INTERVAL override via env)
+#   - Smoke tests (SOURCE__INTERVAL_LIMIT=1 to process a single window)
+#
+# Changed from case 1:
+#   [job.trigger]   type = "once"   (was type = "cron")
 #
 # main.rs:
 #   registry.register_envelope::<ApiUserResponse>("ApiUserResponse");
@@ -13,11 +21,11 @@
 [job]
 name = "user-sync"
 
+# KEY: run once and exit — no scheduler, no Ctrl-C wait
 [job.trigger]
-type = "cron"
-cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+type = "once"
 
-# ── Resources — identical in all four cases ───────────────────────────────
+# ── Resources — identical in all cases ───────────────────────────────────
 
 [resources.pg]
 type            = "postgres"
@@ -36,16 +44,13 @@ timeout_secs   = 620
 keepalive_secs = 30
 
 [resources.svc]
-type         = "http_service"
-http         = "http"
-auth         = "auth"
-endpoint     = { env = "SOURCE__USER_ENDPOINT" }
-realm_type   = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
-# start_param = "start_time"   # default — override for APIs using different names
-# end_param   = "end_time"     # default
-# date_format = "%Y%m%d"       # default — e.g. "%Y-%m-%d" or "%s" for unix timestamp
+type       = "http_service"
+http       = "http"
+auth       = "auth"
+endpoint   = { env = "SOURCE__USER_ENDPOINT" }
+realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
 
-# ── Slots — window scope: cleared before each retry attempt ───────────────
+# ── Slots ─────────────────────────────────────────────────────────────────
 
 [slots.api_rows]
 type  = "ApiUser"
@@ -53,7 +58,7 @@ scope = "window"
 
 [slots.db_rows]
 type  = "DbUser"
-scope = "window"    # KEY: window = cleared every retry; tx commits inside loop
+scope = "window"
 
 # ── Pre-job ───────────────────────────────────────────────────────────────
 
@@ -61,6 +66,9 @@ scope = "window"    # KEY: window = cleared every retry; tx commits inside loop
 init_resources = true
 
 # ── Main job ──────────────────────────────────────────────────────────────
+#
+# Tip: override the window range at runtime for targeted backfills:
+#   SOURCE__START_INTERVAL=90 SOURCE__END_INTERVAL=60 SOURCE__INTERVAL_LIMIT=30 cargo run
 
 [main_job.iterator]
 type           = "date_window"
@@ -87,13 +95,9 @@ writes    = "db_rows"
 append    = false
 
 [[main_job.retry_steps]]
-type  = "tx_upsert"     # commit happens here, inside the retry loop
+type  = "tx_upsert"
 model = "DbUser"
 reads = "db_rows"
-
-[[main_job.post_window_steps]]
-type = "sleep"
-secs = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
 
 # ── Post-job ──────────────────────────────────────────────────────────────
 
@@ -104,7 +108,3 @@ type = "log_summary"
 type          = "raw_sql"
 sql           = { env = "SINK__SYNC_SQL", default = "" }
 skip_if_empty = true
-
-[[post_job.steps]]
-type = "custom"
-hook = "UserSyncSummary"    # optional: register in main.rs or remove this step

@@ -19,7 +19,8 @@
 [job]
 name = "user-sync"
 
-[job.scheduler]
+[job.trigger]
+type = "cron"
 cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
 
 [resources.pg]
