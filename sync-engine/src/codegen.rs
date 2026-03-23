@@ -822,21 +822,47 @@ fn build_svg(schema_path: &Path, pipeline_path: &Path) -> String {
         .and_then(|v| v.get("job")?.get("name")?.as_str().map(str::to_owned))
         .unwrap_or_else(|| table_name.replace('_', "-"));
 
-    let cron = pipeline_val.as_ref()
-        .and_then(|v| {
-            let sch = v.get("job")?.get("scheduler")?;
-            sch.get("cron")?.as_str()
-                .or_else(|| sch.get("cron")?.get("default")?.as_str())
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| "0 */30 * * * *".to_owned());
-
     let has_queue = pipeline_val.as_ref()
         .map(|v| v.get("queues").is_some())
         .unwrap_or(false);
 
     let sink_label    = if has_queue { "send_to_queue" } else { "tx_upsert" };
     let pattern_label = if has_queue { "case 3/4 — async queue" } else { "case 1 — tx per window" };
+
+    // Trigger label shown in the scheduler box at the bottom of the diagram.
+    let trigger_label: String = pipeline_val.as_ref()
+        .and_then(|v| {
+            if let Some(t) = v.get("job").and_then(|j| j.get("trigger")) {
+                let ty = t.get("type").and_then(|x| x.as_str()).unwrap_or("cron");
+                return Some(match ty {
+                    "once"      => "trigger: once (run-and-exit)".to_owned(),
+                    "webhook"   => {
+                        let port = t.get("port").and_then(|p| p.as_integer()).unwrap_or(8080);
+                        format!("trigger: webhook  POST :{port}  ·  mutex-skip")
+                    }
+                    "pg_notify" => {
+                        let ch = t.get("channel")
+                            .and_then(|c| c.as_str()
+                                .or_else(|| c.get("default")?.as_str()))
+                            .unwrap_or("sync_trigger");
+                        format!("trigger: pg_notify  LISTEN \"{ch}\"  ·  mutex-skip")
+                    }
+                    _ => {
+                        let c = t.get("cron")
+                            .and_then(|cv| cv.as_str()
+                                .or_else(|| cv.get("default")?.as_str()))
+                            .unwrap_or("0 */30 * * * *");
+                        format!("trigger: cron \"{c}\"  ·  mutex-skip")
+                    }
+                });
+            }
+            let sch = v.get("job")?.get("scheduler")?;
+            let c = sch.get("cron")?.as_str()
+                .or_else(|| sch.get("cron")?.get("default")?.as_str())
+                .unwrap_or("0 */30 * * * *");
+            Some(format!("trigger: cron \"{c}\"  ·  mutex-skip if previous tick running"))
+        })
+        .unwrap_or_else(|| "trigger: cron \"0 */30 * * * *\"  ·  mutex-skip".to_owned());
 
     // ── Layout constants ──────────────────────────────────────────────────
     let w           = 900i32;
@@ -917,7 +943,7 @@ fn build_svg(schema_path: &Path, pipeline_path: &Path) -> String {
     // ── Title ──────────────────────────────────────────────────────────────
     svg.push_str(&format!(
         "<text x=\"40\" y=\"44\" class=\"title\">{job_name}  —  pipeline architecture</text>\n\
-         <text x=\"40\" y=\"62\" class=\"sub\">pattern: {pattern_label}  ·  scheduler: {cron}  ·  sink: {table_name}</text>\n"
+         <text x=\"40\" y=\"62\" class=\"sub\">pattern: {pattern_label}  ·  {trigger_label}  ·  sink: {table_name}</text>\n"
     ));
 
     // ── Schema section ────────────────────────────────────────────────────
@@ -1086,9 +1112,9 @@ fn build_svg(schema_path: &Path, pipeline_path: &Path) -> String {
         "<rect x=\"40\" y=\"{sch_y}\" width=\"{}\" height=\"44\" rx=\"6\" class=\"box\"/>\n\
          <rect x=\"40\" y=\"{sch_y}\" width=\"{}\" height=\"22\" rx=\"6\" class=\"hdr5\"/>\n\
          <rect x=\"40\" y=\"{}\" width=\"{}\" height=\"10\" class=\"hdr5\"/>\n\
-         <text x=\"{}\" y=\"{}\" class=\"ht5\" text-anchor=\"middle\">cron scheduler</text>\n\
+         <text x=\"{}\" y=\"{}\" class=\"ht5\" text-anchor=\"middle\">trigger</text>\n\
          <text x=\"{}\" y=\"{}\" class=\"dim\" text-anchor=\"middle\">\
-         cron=\"{cron}\"  ·  mutex-skip if previous tick still running  ·  pipeline slots survive ticks\
+         {trigger_label}  ·  pipeline slots survive ticks\
          </text>\n",
         w - 80, w - 80,
         sch_y + 12, w - 80,

@@ -99,6 +99,21 @@ pub struct JobContext {
 
     /// Job-level name (for logging).
     pub job_name: String,
+
+    // ── Optional backend clients ──────────────────────────────────────────
+
+    /// Elasticsearch base URL — set when a [resources.*] type="elasticsearch" is defined.
+    /// Steps call the ES REST API directly via ctx.connections.http.
+    #[cfg(feature = "elasticsearch")]
+    pub es_url: Option<String>,
+
+    /// Kafka producer — set when a [resources.*] type="kafka" is defined.
+    #[cfg(feature = "kafka")]
+    pub kafka_producer: Option<Arc<rdkafka::producer::FutureProducer>>,
+
+    /// Kafka consumer — set when a [resources.*] type="kafka" is defined.
+    #[cfg(feature = "kafka")]
+    pub kafka_consumer: Option<Arc<rdkafka::consumer::StreamConsumer>>,
 }
 
 impl JobContext {
@@ -114,7 +129,30 @@ impl JobContext {
             window:      RwLock::new(WindowMeta::default()),
             config,
             job_name:    job_name.into(),
+            #[cfg(feature = "elasticsearch")]
+            es_url: None,
+            #[cfg(feature = "kafka")]
+            kafka_producer: None,
+            #[cfg(feature = "kafka")]
+            kafka_consumer: None,
         }
+    }
+
+    // ── Backend client accessors ──────────────────────────────────────────
+
+    #[cfg(feature = "elasticsearch")]
+    pub fn es_client(&self) -> Option<&str> {
+        self.es_url.as_deref()
+    }
+
+    #[cfg(feature = "kafka")]
+    pub fn kafka_producer(&self) -> Option<&rdkafka::producer::FutureProducer> {
+        self.kafka_producer.as_deref()
+    }
+
+    #[cfg(feature = "kafka")]
+    pub fn kafka_consumer(&self) -> Option<&rdkafka::consumer::StreamConsumer> {
+        self.kafka_consumer.as_deref()
     }
 
     // ── Slot helpers ──────────────────────────────────────────────────────

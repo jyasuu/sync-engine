@@ -1,12 +1,18 @@
 // sync-engine/src/pipeline_runner.rs
 //
-// New TOML schema — four sections map 1:1 to the job pseudocode:
+// TOML schema — five sections map 1:1 to the job pseudocode:
 //   [resources]       — named connections (pg, auth, http, svc)
 //   [slots] / [queues]— named typed data channels
 //   [pre_job]         — init_resources + optional consumer spawn
 //   [main_job]        — iterator, retry, [[retry_steps]], post_window, post_loop
 //   [post_job]        — [[steps]]
-//   [job]             — name, [job.scheduler]
+//   [job]             — name, [job.trigger]  (alias: [job.scheduler] → cron trigger)
+//
+// Trigger types (set via [job.trigger] type = "..."):
+//   cron       — tokio-cron-scheduler; mutex-skips overlapping ticks  (default)
+//   once       — run one tick then exit cleanly
+//   webhook    — tiny HTTP server; any POST fires a tick
+//   pg_notify  — sqlx LISTEN; a NOTIFY on the channel fires a tick
 //
 // run(path, registry) — the single entry-point for a business crate's main.rs.
 
@@ -58,9 +64,84 @@ pub struct PipelineConfig {
 #[derive(Debug, Deserialize)]
 pub struct JobMeta {
     pub name:      Option<String>,
+    /// New key. Preferred over `scheduler`.
+    pub trigger:   Option<TriggerConfig>,
+    /// Legacy alias: `[job.scheduler] cron = "..."` maps to `TriggerConfig::Cron`.
+    /// Kept so existing pipeline.toml files don't need changes.
     pub scheduler: Option<SchedulerConfig>,
 }
 
+/// `[job.trigger]` — selects the runtime loop that fires `run_one_tick`.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TriggerConfig {
+    /// Default. Fires on a cron schedule; mutex-skips overlapping ticks.
+    ///
+    /// ```toml
+    /// [job.trigger]
+    /// type = "cron"
+    /// cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+    /// ```
+    Cron {
+        cron: ConfigValue,
+    },
+
+    /// Run exactly one tick then exit with code 0.
+    /// Useful for one-shot invocations (CI, k8s Job, manual backfill).
+    ///
+    /// ```toml
+    /// [job.trigger]
+    /// type = "once"
+    /// ```
+    Once,
+
+    /// Listen for HTTP POST requests; each request fires one tick.
+    /// Returns 202 Accepted immediately; the tick runs in the background
+    /// and is mutex-skipped if a previous tick is still running.
+    ///
+    /// ```toml
+    /// [job.trigger]
+    /// type = "webhook"
+    /// host = "0.0.0.0"   # optional, default 0.0.0.0
+    /// port = 8080         # optional, default 8080
+    /// ```
+    Webhook {
+        #[serde(default = "default_webhook_host")]
+        host: String,
+        #[serde(default = "default_webhook_port")]
+        port: u16,
+    },
+
+    /// LISTEN on a Postgres NOTIFY channel; each notification fires one tick.
+    /// Requires a `postgres` resource to be defined in `[resources]`.
+    ///
+    /// ```toml
+    /// [job.trigger]
+    /// type    = "pg_notify"
+    /// channel = { env = "TRIGGER__PG_CHANNEL", default = "sync_trigger" }
+    /// ```
+    PgNotify {
+        channel: ConfigValue,
+    },
+
+    /// Consume from a Kafka topic; each message fires one tick.
+    /// Requires a `kafka` resource with a `topic` defined in `[resources]`.
+    ///
+    /// ```toml
+    /// [job.trigger]
+    /// type  = "kafka"
+    /// topic = { env = "TRIGGER__KAFKA_TOPIC" }
+    /// ```
+    #[cfg(feature = "kafka")]
+    Kafka {
+        topic: ConfigValue,
+    },
+}
+
+fn default_webhook_host() -> String { "0.0.0.0".into() }
+fn default_webhook_port() -> u16    { 8080 }
+
+/// Legacy `[job.scheduler]` block — still accepted, maps to `TriggerConfig::Cron`.
 #[derive(Debug, Deserialize)]
 pub struct SchedulerConfig {
     pub cron: ConfigValue,
@@ -105,11 +186,43 @@ pub enum ResourceDef {
         #[serde(default)]
         extra_params: Vec<ExtraParam>,
     },
+
+    /// Elasticsearch cluster.
+    ///
+    /// ```toml
+    /// [resources.es]
+    /// type = "elasticsearch"
+    /// url  = { env = "ES_URL", default = "http://localhost:9200" }
+    /// ```
+    #[cfg(feature = "elasticsearch")]
+    Elasticsearch {
+        url: ConfigValue,
+    },
+
+    /// Kafka cluster — used for both produce (sink) and consume (source/trigger).
+    ///
+    /// ```toml
+    /// [resources.kafka]
+    /// type     = "kafka"
+    /// brokers  = { env = "KAFKA_BROKERS", default = "localhost:9092" }
+    /// group_id = { env = "KAFKA_GROUP_ID", default = "sync-engine" }
+    /// topic    = { env = "KAFKA_TOPIC" }   # required for consume trigger/source
+    /// ```
+    #[cfg(feature = "kafka")]
+    Kafka {
+        brokers:  ConfigValue,
+        #[serde(default = "default_kafka_group")]
+        group_id: ConfigValue,
+        #[serde(default)]
+        topic:    Option<ConfigValue>,
+    },
 }
 
 fn default_start_param() -> String { "start_time".into() }
 fn default_end_param()   -> String { "end_time".into() }
 fn default_date_fmt()    -> String { "%Y%m%d".into() }
+#[cfg(feature = "kafka")]
+fn default_kafka_group() -> ConfigValue { ConfigValue::Literal("sync-engine".into()) }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ExtraParam {
@@ -249,6 +362,43 @@ pub struct MainStepConfig {
     pub skip_if_empty: bool,
     /// For type="send_to_queue"
     pub queue:     Option<String>,
+
+    // ── Postgres commit strategy ──────────────────────────────────────────
+    /// Controls how Postgres writes are committed.
+    /// Valid values: "tx_scope" (default), "autocommit", "bulk_tx"
+    /// - tx_scope   — one transaction per window  (type="tx_upsert", default)
+    /// - autocommit — each row committed independently via pool
+    /// - bulk_tx    — accumulate then commit in post_loop_steps (Case 2 pattern)
+    #[serde(default)]
+    pub commit_strategy: Option<String>,
+
+    // ── RabbitMQ ack strategy ─────────────────────────────────────────────
+    /// Controls when RabbitMQ messages are acknowledged.
+    /// Valid values: "ack_on_commit" (default), "ack_on_receive"
+    /// - ack_on_commit  — ack after the Postgres tx commits (safe, at-least-once)
+    /// - ack_on_receive — ack immediately on receive (fast, at-most-once)
+    #[serde(default)]
+    pub ack_strategy: Option<String>,
+
+    // ── Elasticsearch fields ──────────────────────────────────────────────
+    /// ES index name. Used by type="es_index" and type="es_fetch".
+    pub index:     Option<String>,
+    /// ES operation for type="es_index": "upsert" (default), "delete", "create"
+    pub op:        Option<String>,
+    /// ES scroll TTL for type="es_fetch" (default: "1m")
+    pub scroll_ttl: Option<String>,
+    /// ES batch size for type="es_fetch" (default: 500)
+    pub batch_size: Option<i64>,
+
+    // ── Kafka fields ──────────────────────────────────────────────────────
+    /// Kafka topic. Used by type="kafka_produce" and type="kafka_consume".
+    pub topic:        Option<ConfigValue>,
+    /// Field name to use as Kafka message key (kafka_produce).
+    pub key_field:    Option<String>,
+    /// Max messages to consume per step execution (kafka_consume, default: 500).
+    pub max_messages: Option<usize>,
+    /// Timeout (ms) waiting for Kafka messages (kafka_consume, default: 5000).
+    pub timeout_ms:   Option<u64>,
 }
 
 // ── [post_job] ────────────────────────────────────────────────────────────
@@ -317,6 +467,30 @@ pub fn validate(cfg: &PipelineConfig, registry: &TypeRegistry) -> Result<()> {
             ));
         }
     };
+
+    // Validate trigger config
+    if let Some(trigger) = cfg.job.as_ref().and_then(|j| j.trigger.as_ref()) {
+        if let TriggerConfig::PgNotify { .. } = trigger {
+            #[cfg(not(feature = "postgres"))]
+            errors.push(
+                "trigger type=\"pg_notify\" requires feature \"postgres\" — add it to Cargo.toml".into()
+            );
+            #[cfg(feature = "postgres")]
+            {
+                let has_pg = cfg.resources.values().any(|r| matches!(r, ResourceDef::Postgres { .. }));
+                if !has_pg {
+                    errors.push(
+                        "trigger type=\"pg_notify\" requires a [resources.*] postgres entry".into()
+                    );
+                }
+            }
+        }
+        if let TriggerConfig::Webhook { port, .. } = trigger {
+            if *port == 0 {
+                errors.push("trigger type=\"webhook\": port must be > 0".into());
+            }
+        }
+    }
 
     // Validate iterator type
     let iter_type = cfg.main_job.iterator.iter_type.as_str();
@@ -392,9 +566,94 @@ pub fn validate(cfg: &PipelineConfig, registry: &TypeRegistry) -> Result<()> {
                 }
             }
             "sleep" | "raw_sql" => {} // no type-level validation needed
-            other => errors.push(format!("Unknown step type \"{other}\" — valid types: fetch, transform, tx_upsert, send_to_queue, sleep, raw_sql")),
+            "es_index" => {
+                #[cfg(not(feature = "elasticsearch"))]
+                errors.push(format!("{ctx}: requires feature \"elasticsearch\""));
+                if step.model.is_none() {
+                    errors.push(format!("{ctx}: missing `model` field"));
+                }
+                if step.index.is_none() {
+                    errors.push(format!("{ctx}: missing `index` field"));
+                }
+                if let Some(ref op) = step.op {
+                    if !["upsert", "delete", "create"].contains(&op.as_str()) {
+                        errors.push(format!("{ctx}: `op` must be upsert, delete, or create — got \"{op}\""));
+                    }
+                }
+                if let Some(ref r) = step.reads { check_slot(r, &ctx, &mut errors); }
+            }
+            "es_fetch" => {
+                #[cfg(not(feature = "elasticsearch"))]
+                errors.push(format!("{ctx}: requires feature \"elasticsearch\""));
+                if step.model.is_none() {
+                    errors.push(format!("{ctx}: missing `model` field (used to select the deserialize type)"));
+                }
+                if step.index.is_none() {
+                    errors.push(format!("{ctx}: missing `index` field"));
+                }
+                if let Some(ref w) = step.writes { check_slot(w, &ctx, &mut errors); }
+            }
+            "kafka_produce" => {
+                #[cfg(not(feature = "kafka"))]
+                errors.push(format!("{ctx}: requires feature \"kafka\""));
+                if step.model.is_none() {
+                    errors.push(format!("{ctx}: missing `model` field"));
+                }
+                if step.topic.is_none() {
+                    errors.push(format!("{ctx}: missing `topic` field"));
+                }
+                if let Some(ref r) = step.reads { check_slot(r, &ctx, &mut errors); }
+            }
+            "kafka_consume" => {
+                #[cfg(not(feature = "kafka"))]
+                errors.push(format!("{ctx}: requires feature \"kafka\""));
+                if step.model.is_none() {
+                    errors.push(format!("{ctx}: missing `model` field"));
+                }
+                if step.topic.is_none() {
+                    errors.push(format!("{ctx}: missing `topic` field"));
+                }
+                if let Some(ref w) = step.writes { check_slot(w, &ctx, &mut errors); }
+            }
+            other => errors.push(format!(
+                "Unknown step type \"{other}\" — valid types: \
+                 fetch, transform, tx_upsert, send_to_queue, sleep, raw_sql, \
+                 es_index, es_fetch, kafka_produce, kafka_consume"
+            )),
         }
-    }
+
+        // Cross-field: commit_strategy only valid on tx_upsert
+        if let Some(ref cs) = step.commit_strategy {
+            if step.step_type != "tx_upsert" {
+                errors.push(format!(
+                    "step type=\"{}\": `commit_strategy` is only valid on type=\"tx_upsert\"",
+                    step.step_type
+                ));
+            }
+            if !["tx_scope", "autocommit", "bulk_tx"].contains(&cs.as_str()) {
+                errors.push(format!(
+                    "step type=\"tx_upsert\": unknown commit_strategy \"{cs}\" \
+                     — valid values: tx_scope, autocommit, bulk_tx"
+                ));
+            }
+        }
+
+        // Cross-field: ack_strategy only meaningful on send_to_queue with a rabbitmq queue
+        if let Some(ref ack) = step.ack_strategy {
+            if step.step_type != "send_to_queue" {
+                errors.push(format!(
+                    "step type=\"{}\": `ack_strategy` is only valid on type=\"send_to_queue\"",
+                    step.step_type
+                ));
+            }
+            if !["ack_on_commit", "ack_on_receive", "ack_per_batch"].contains(&ack.as_str()) {
+                errors.push(format!(
+                    "step type=\"send_to_queue\": unknown ack_strategy \"{ack}\" \
+                     — valid values: ack_on_commit, ack_on_receive, ack_per_batch"
+                ));
+            }
+        }
+    } // end for step in all_steps
 
     // Validate pre_job consumer steps
     for step in &cfg.pre_job.steps {
@@ -515,6 +774,46 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
         }
     }
 
+    // Pass 5: Elasticsearch — store the base URL; steps call the REST API
+    // via ctx.connections.http (reqwest client already in context).
+    #[cfg(feature = "elasticsearch")]
+    let mut es_url_opt: Option<String> = None;
+    #[cfg(feature = "elasticsearch")]
+    for (name, def) in &cfg.resources {
+        if let ResourceDef::Elasticsearch { url } = def {
+            let url_str = url.resolve()?;
+            info!("resource[{}]: Elasticsearch at {}", name, url_str);
+            es_url_opt = Some(url_str);
+            break;
+        }
+    }
+
+    // Pass 6: Kafka
+    #[cfg(feature = "kafka")]
+    let mut kafka_prod: Option<Arc<rdkafka::producer::FutureProducer>> = None;
+    #[cfg(feature = "kafka")]
+    let mut kafka_cons: Option<Arc<rdkafka::consumer::StreamConsumer>> = None;
+    #[cfg(feature = "kafka")]
+    for (name, def) in &cfg.resources {
+        if let ResourceDef::Kafka { brokers, group_id, topic } = def {
+            let brokers_str  = brokers.resolve()?;
+            let group_str    = group_id.resolve()?;
+            info!("resource[{}]: connecting to Kafka brokers={}", name, brokers_str);
+
+            let producer = crate::step::kafka::build_producer(&brokers_str)
+                .with_context(|| format!("Kafka producer failed for resource [{name}]"))?;
+            kafka_prod = Some(Arc::new(producer));
+
+            if let Some(ref t) = topic {
+                let topic_str = t.resolve()?;
+                let consumer = crate::step::kafka::build_consumer(&brokers_str, &group_str, &topic_str)
+                    .with_context(|| format!("Kafka consumer failed for resource [{name}]"))?;
+                kafka_cons = Some(Arc::new(consumer));
+            }
+            break;
+        }
+    }
+
     #[cfg(feature = "postgres")]
     let db = db_pools.into_values().next()
         .ok_or_else(|| anyhow!("No postgres resource defined — add [resources.pg] or remove the postgres feature requirement"))?;
@@ -539,7 +838,16 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
     config.insert("iterator.interval_limit".into(), iter.interval_limit.resolve()?);
     config.insert("iterator.sleep_secs".into(),     iter.sleep_secs.resolve()?);
 
-    let ctx = Arc::new(JobContext::new(connections, config, job_name));
+    #[allow(unused_mut)]
+    let mut ctx_inner = JobContext::new(connections, config, job_name);
+
+    // Wire in optional backend clients
+    #[cfg(feature = "elasticsearch")]
+    { ctx_inner.es_url = es_url_opt; }
+    #[cfg(feature = "kafka")]
+    { ctx_inner.kafka_producer = kafka_prod; ctx_inner.kafka_consumer = kafka_cons; }
+
+    let ctx = Arc::new(ctx_inner);
 
     // ── Declare summary slots (always present) ────────────────────────────
     {
@@ -653,10 +961,89 @@ pub fn build_steps(
                 {
                     let model = s.model.as_deref()
                         .ok_or_else(|| anyhow!("tx_upsert step missing `model` field"))?;
-                    runner.push_boxed(registry.build_model_sink(model, &params)?);
+                    let strategy = s.commit_strategy.as_deref().unwrap_or("tx_scope");
+                    match strategy {
+                        "autocommit" => {
+                            runner.push_boxed(registry.build_autocommit_sink(model, &params)?);
+                        }
+                        _ => {
+                            // "tx_scope" (default) and "bulk_tx" both use TxUpsertStep;
+                            // bulk_tx is achieved by placing the step in post_loop_steps.
+                            runner.push_boxed(registry.build_model_sink(model, &params)?);
+                        }
+                    }
                 }
                 #[cfg(not(feature = "postgres"))]
                 return Err(anyhow!("tx_upsert requires feature \"postgres\" — add it to Cargo.toml"));
+            }
+            "es_index" => {
+                #[cfg(feature = "elasticsearch")]
+                {
+                    let reads = s.reads.clone().unwrap_or_else(|| "db_rows".into());
+                    let index = s.index.clone()
+                        .ok_or_else(|| anyhow!("es_index step missing `index` field"))?;
+                    let op = crate::step::elasticsearch::EsOp::from_str(
+                        s.op.as_deref().unwrap_or("upsert")
+                    );
+                    let model = s.model.as_deref()
+                        .ok_or_else(|| anyhow!("es_index step missing `model` field"))?;
+                    runner.push_boxed(registry.build_es_index(model, &reads, &index, op)?);
+                }
+                #[cfg(not(feature = "elasticsearch"))]
+                return Err(anyhow!("es_index requires feature \"elasticsearch\" — add it to Cargo.toml"));
+            }
+            "es_fetch" => {
+                #[cfg(feature = "elasticsearch")]
+                {
+                    let writes     = s.writes.clone().unwrap_or_else(|| "api_rows".into());
+                    let index      = s.index.clone()
+                        .ok_or_else(|| anyhow!("es_fetch step missing `index` field"))?;
+                    let scroll_ttl = s.scroll_ttl.clone().unwrap_or_else(|| "1m".into());
+                    let batch_size = s.batch_size.unwrap_or(500);
+                    let model      = s.model.as_deref()
+                        .ok_or_else(|| anyhow!("es_fetch step missing `model` field"))?;
+                    runner.push_boxed(registry.build_es_fetch(
+                        model, &writes, &index, None, &scroll_ttl, batch_size, s.append,
+                    )?);
+                }
+                #[cfg(not(feature = "elasticsearch"))]
+                return Err(anyhow!("es_fetch requires feature \"elasticsearch\" — add it to Cargo.toml"));
+            }
+            "kafka_produce" => {
+                #[cfg(feature = "kafka")]
+                {
+                    let reads = s.reads.clone().unwrap_or_else(|| "db_rows".into());
+                    let topic = s.topic.as_ref()
+                        .map(|t| t.resolve())
+                        .transpose()?
+                        .ok_or_else(|| anyhow!("kafka_produce step missing `topic` field"))?;
+                    let model = s.model.as_deref()
+                        .ok_or_else(|| anyhow!("kafka_produce step missing `model` field"))?;
+                    runner.push_boxed(registry.build_kafka_produce(
+                        model, &reads, &topic, s.key_field.clone(),
+                    )?);
+                }
+                #[cfg(not(feature = "kafka"))]
+                return Err(anyhow!("kafka_produce requires feature \"kafka\" — add it to Cargo.toml"));
+            }
+            "kafka_consume" => {
+                #[cfg(feature = "kafka")]
+                {
+                    let writes       = s.writes.clone().unwrap_or_else(|| "api_rows".into());
+                    let topic        = s.topic.as_ref()
+                        .map(|t| t.resolve())
+                        .transpose()?
+                        .ok_or_else(|| anyhow!("kafka_consume step missing `topic` field"))?;
+                    let max_messages = s.max_messages.unwrap_or(500);
+                    let timeout_ms   = s.timeout_ms.unwrap_or(5000);
+                    let model        = s.model.as_deref()
+                        .ok_or_else(|| anyhow!("kafka_consume step missing `model` field"))?;
+                    runner.push_boxed(registry.build_kafka_consume(
+                        model, &writes, &topic, max_messages, timeout_ms, s.append,
+                    )?);
+                }
+                #[cfg(not(feature = "kafka"))]
+                return Err(anyhow!("kafka_consume requires feature \"kafka\" — add it to Cargo.toml"));
             }
             "send_to_queue" => {
                 let model = s.model.as_deref()
@@ -734,7 +1121,6 @@ pub async fn run_post_job(
 /// async fn main() -> anyhow::Result<()> {
 ///     let mut reg = TypeRegistry::new();
 ///     // register_envelope / register_transform / register_model
-///     // with your generated types from schema.toml
 ///     sync_engine::run("pipeline.toml", reg).await
 /// }
 /// ```
@@ -744,22 +1130,70 @@ pub async fn run(path: &str, registry: TypeRegistry) -> Result<()> {
     let cfg: PipelineConfig = toml::from_str(&raw)
         .with_context(|| format!("Cannot parse {path}"))?;
 
-    let cron = cfg.job.as_ref()
-        .and_then(|j| j.scheduler.as_ref())
-        .map(|s| s.cron.resolve())
-        .transpose()?
-        .unwrap_or_else(|| "0 */30 * * * *".to_owned());
-
     let cfg = Arc::new(cfg);
     let reg = Arc::new(registry);
 
-    // Validate pipeline config against registry before starting the scheduler.
-    // Catches typos and missing registrations at startup, not on first tick.
     validate(&cfg, &reg)?;
-
-    // Build context once — pipeline-scoped slots survive cron ticks
     let ctx = build_context(&cfg).await?;
 
+    // Resolve trigger: prefer [job.trigger], fall back to legacy [job.scheduler].
+    let trigger = resolve_trigger(&cfg)?;
+
+    match trigger {
+        ResolvedTrigger::Cron(cron)             => run_cron(cfg, ctx, reg, cron).await,
+        ResolvedTrigger::Once                   => run_once(cfg, ctx, reg).await,
+        ResolvedTrigger::Webhook { host, port } => run_webhook(cfg, ctx, reg, host, port).await,
+        ResolvedTrigger::PgNotify(channel)      => run_pg_notify(cfg, ctx, reg, channel).await,
+        #[cfg(feature = "kafka")]
+        ResolvedTrigger::Kafka(topic)           => run_kafka_trigger(cfg, ctx, reg, topic).await,
+    }
+}
+
+// ── Trigger resolution ────────────────────────────────────────────────────
+
+enum ResolvedTrigger {
+    Cron(String),
+    Once,
+    Webhook { host: String, port: u16 },
+    PgNotify(String),
+    #[cfg(feature = "kafka")]
+    Kafka(String),
+}
+
+fn resolve_trigger(cfg: &PipelineConfig) -> Result<ResolvedTrigger> {
+    if let Some(trigger) = cfg.job.as_ref().and_then(|j| j.trigger.as_ref()) {
+        return match trigger {
+            TriggerConfig::Cron { cron } => Ok(ResolvedTrigger::Cron(cron.resolve()?)),
+            TriggerConfig::Once => Ok(ResolvedTrigger::Once),
+            TriggerConfig::Webhook { host, port } => Ok(ResolvedTrigger::Webhook {
+                host: host.clone(),
+                port: *port,
+            }),
+            TriggerConfig::PgNotify { channel } => {
+                Ok(ResolvedTrigger::PgNotify(channel.resolve()?))
+            }
+            #[cfg(feature = "kafka")]
+            TriggerConfig::Kafka { topic } => Ok(ResolvedTrigger::Kafka(topic.resolve()?)),
+        };
+    }
+    if let Some(cron_str) = cfg.job.as_ref()
+        .and_then(|j| j.scheduler.as_ref())
+        .map(|s| s.cron.resolve())
+        .transpose()?
+    {
+        return Ok(ResolvedTrigger::Cron(cron_str));
+    }
+    Ok(ResolvedTrigger::Cron("0 */30 * * * *".to_owned()))
+}
+
+// ── Trigger loop: cron ────────────────────────────────────────────────────
+
+async fn run_cron(
+    cfg:  Arc<PipelineConfig>,
+    ctx:  Arc<JobContext>,
+    reg:  Arc<TypeRegistry>,
+    cron: String,
+) -> Result<()> {
     let lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
     let mut scheduler = JobScheduler::new().await?;
 
@@ -780,10 +1214,173 @@ pub async fn run(path: &str, registry: TypeRegistry) -> Result<()> {
     })?).await?;
 
     scheduler.start().await?;
-    info!("Scheduled ({cron}). Ctrl-C to exit.");
+    info!("Trigger: cron ({cron}). Ctrl-C to exit.");
     tokio::signal::ctrl_c().await?;
     scheduler.shutdown().await?;
     Ok(())
+}
+
+// ── Trigger loop: once ────────────────────────────────────────────────────
+
+async fn run_once(
+    cfg: Arc<PipelineConfig>,
+    ctx: Arc<JobContext>,
+    reg: Arc<TypeRegistry>,
+) -> Result<()> {
+    info!("Trigger: once — running single tick then exiting.");
+    run_one_tick(&cfg, &ctx, &reg).await?;
+    info!("Once trigger complete.");
+    Ok(())
+}
+
+// ── Trigger loop: webhook ─────────────────────────────────────────────────
+//
+// Binds a TCP listener on host:port. Any HTTP POST to any path fires a tick.
+// Non-POST requests receive 405. The response is always sent before the tick
+// runs so the caller is never left waiting.
+//
+// No new dependencies — uses tokio's raw TcpListener + minimal HTTP parsing.
+
+async fn run_webhook(
+    cfg:  Arc<PipelineConfig>,
+    ctx:  Arc<JobContext>,
+    reg:  Arc<TypeRegistry>,
+    host: String,
+    port: u16,
+) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let addr = format!("{host}:{port}");
+    let listener = TcpListener::bind(&addr).await
+        .with_context(|| format!("Webhook: cannot bind {addr}"))?;
+    info!("Trigger: webhook listening on http://{addr}  (POST any path to fire a tick)");
+
+    let lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+
+    loop {
+        let (mut socket, peer) = listener.accept().await?;
+        let cfg  = Arc::clone(&cfg);
+        let ctx  = Arc::clone(&ctx);
+        let reg  = Arc::clone(&reg);
+        let lock = Arc::clone(&lock);
+
+        tokio::spawn(async move {
+            // Read just enough to determine the HTTP method.
+            let mut buf = [0u8; 512];
+            let n = match socket.read(&mut buf).await {
+                Ok(n) => n,
+                Err(_) => return,
+            };
+            let head = std::str::from_utf8(&buf[..n]).unwrap_or("");
+            let is_post = head.starts_with("POST ");
+
+            let (status, body) = if is_post {
+                ("202 Accepted", "tick queued\n")
+            } else {
+                ("405 Method Not Allowed", "POST required\n")
+            };
+
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            drop(socket); // close connection before running tick
+
+            if !is_post {
+                return;
+            }
+
+            tracing::info!(peer = %peer, "Webhook: received POST — firing tick");
+            let _guard = match lock.try_lock() {
+                Ok(g)  => g,
+                Err(_) => { tracing::debug!("Previous tick still running — skipping webhook trigger"); return; }
+            };
+            if let Err(e) = run_one_tick(&cfg, &ctx, &reg).await {
+                tracing::error!(error = %e, "Webhook tick failed");
+            }
+        });
+    }
+}
+
+// ── Trigger loop: pg_notify ───────────────────────────────────────────────
+//
+// Uses sqlx::PgListener (already a transitive dep via the postgres feature).
+// Listens on the configured channel; each NOTIFY fires one tick.
+// Mutex-skips overlapping ticks the same way cron does.
+
+async fn run_pg_notify(
+    cfg:     Arc<PipelineConfig>,
+    ctx:     Arc<JobContext>,
+    reg:     Arc<TypeRegistry>,
+    channel: String,
+) -> Result<()> {
+    #[cfg(not(feature = "postgres"))]
+    return Err(anyhow!("trigger type=\"pg_notify\" requires feature \"postgres\" — add it to Cargo.toml"));
+
+    #[cfg(feature = "postgres")]
+    {
+        // Reuse the postgres URL from [resources].
+        let pg_url = cfg.resources.iter()
+            .find_map(|(_, def)| {
+                if let ResourceDef::Postgres { url, .. } = def { Some(url.resolve()) }
+                else { None }
+            })
+            .ok_or_else(|| anyhow!(
+                "trigger type=\"pg_notify\" requires a [resources.pg] postgres resource"
+            ))??;
+
+        let mut listener = sqlx::postgres::PgListener::connect(&pg_url).await
+            .context("pg_notify: failed to connect PgListener")?;
+        listener.listen(&channel).await
+            .with_context(|| format!("pg_notify: failed to LISTEN on channel \"{channel}\""))?;
+
+        info!("Trigger: pg_notify — LISTEN \"{channel}\". Ctrl-C to exit.");
+
+        let lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+
+        loop {
+            tokio::select! {
+                notify = listener.recv() => {
+                    match notify {
+                        Ok(n) => {
+                            tracing::info!(
+                                channel = %n.channel(),
+                                payload = %n.payload(),
+                                "pg_notify: received NOTIFY — firing tick"
+                            );
+                            let cfg  = Arc::clone(&cfg);
+                            let ctx  = Arc::clone(&ctx);
+                            let reg  = Arc::clone(&reg);
+                            let lock = Arc::clone(&lock);
+                            tokio::spawn(async move {
+                                let _guard = match lock.try_lock() {
+                                    Ok(g)  => g,
+                                    Err(_) => {
+                                        tracing::debug!("Previous tick still running — skipping pg_notify trigger");
+                                        return;
+                                    }
+                                };
+                                if let Err(e) = run_one_tick(&cfg, &ctx, &reg).await {
+                                    tracing::error!(error = %e, "pg_notify tick failed");
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "pg_notify: listener error — reconnecting");
+                            // sqlx::PgListener auto-reconnects on the next recv() call
+                        }
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("pg_notify: shutting down.");
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn run_one_tick(
@@ -836,5 +1433,90 @@ async fn run_one_tick(
     // Post-job
     run_post_job(&cfg.post_job, ctx, reg).await?;
 
+    Ok(())
+}
+
+// ── Trigger loop: kafka ───────────────────────────────────────────────────
+//
+// Subscribes to a Kafka topic; each message received fires one tick.
+// Commits the offset after the tick completes (at-least-once delivery).
+// Mutex-skips overlapping ticks the same way cron and pg_notify do.
+
+#[cfg(feature = "kafka")]
+async fn run_kafka_trigger(
+    cfg:   Arc<PipelineConfig>,
+    ctx:   Arc<JobContext>,
+    reg:   Arc<TypeRegistry>,
+    topic: String,
+) -> Result<()> {
+    use rdkafka::consumer::Consumer;
+    use rdkafka::Message;
+
+    let consumer = ctx.kafka_consumer()
+        .ok_or_else(|| anyhow!(
+            "trigger type=\"kafka\" requires a [resources.*] kafka entry with `topic` set"
+        ))?;
+
+    info!("Trigger: kafka — consuming topic \"{topic}\". Ctrl-C to exit.");
+
+    let lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+
+    loop {
+        tokio::select! {
+            msg = async {
+                use futures::StreamExt as _;
+                consumer.stream().next().await
+            } => {
+                match msg {
+                    Some(Ok(m)) => {
+                        let offset  = m.offset();
+                        let part    = m.partition();
+                        tracing::info!(
+                            topic = %topic, partition = part, offset = offset,
+                            "Kafka trigger: message received — firing tick"
+                        );
+
+                        let cfg  = Arc::clone(&cfg);
+                        let ctx  = Arc::clone(&ctx);
+                        let reg  = Arc::clone(&reg);
+                        let lock = Arc::clone(&lock);
+
+                        let _guard = match lock.try_lock() {
+                            Ok(g)  => g,
+                            Err(_) => {
+                                tracing::debug!(
+                                    "Previous tick still running — skipping kafka trigger"
+                                );
+                                // Still commit so we don't re-trigger on this message
+                                consumer.store_offset_from_message(&m)
+                                    .unwrap_or_else(|e| tracing::warn!(error=%e, "offset store failed"));
+                                continue;
+                            }
+                        };
+
+                        if let Err(e) = run_one_tick(&cfg, &ctx, &reg).await {
+                            tracing::error!(error = %e, "Kafka trigger tick failed");
+                        }
+
+                        consumer.store_offset_from_message(&m)
+                            .unwrap_or_else(|e| tracing::warn!(error=%e, "offset store failed"));
+                        consumer.commit_consumer_state(rdkafka::consumer::CommitMode::Async)
+                            .unwrap_or_else(|e| tracing::warn!(error=%e, "offset commit failed"));
+                    }
+                    Some(Err(e)) => {
+                        tracing::warn!(error = %e, "Kafka trigger: consume error");
+                    }
+                    None => {
+                        tracing::info!("Kafka trigger: stream ended — exiting.");
+                        break;
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("Kafka trigger: shutting down.");
+                break;
+            }
+        }
+    }
     Ok(())
 }

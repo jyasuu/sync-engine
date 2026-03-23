@@ -9,6 +9,14 @@ pub mod setup;
 pub mod sink;
 pub mod transform;
 
+// ── New backend steps ─────────────────────────────────────────────────────
+#[cfg(feature = "postgres")]
+pub mod autocommit;
+#[cfg(feature = "elasticsearch")]
+pub mod elasticsearch;
+#[cfg(feature = "kafka")]
+pub mod kafka;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;

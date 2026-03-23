@@ -19,8 +19,29 @@
 [job]
 name = "user-sync"
 
-[job.scheduler]
+# ── Trigger ────────────────────────────────────────────────────────────────
+# Pick one trigger type. All four share the same run_one_tick() core.
+#
+# Option 1 (active): cron — fires on a schedule, mutex-skips if still running
+[job.trigger]
+type = "cron"
 cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+
+# Option 2: once — run a single tick and exit (CI, k8s Job, manual backfill)
+# [job.trigger]
+# type = "once"
+
+# Option 3: webhook — HTTP POST fires a tick; returns 202 immediately
+# [job.trigger]
+# type = "webhook"
+# host = "0.0.0.0"   # default
+# port = 8080         # default
+
+# Option 4: pg_notify — Postgres LISTEN/NOTIFY fires a tick
+# [job.trigger]
+# type    = "pg_notify"
+# channel = { env = "TRIGGER__PG_CHANNEL", default = "sync_trigger" }
+# Trigger with: SELECT pg_notify('sync_trigger', '{}');
 
 # ── Resources ─────────────────────────────────────────────────────────────
 # Named connections. Engine builds them in dependency order.
@@ -157,3 +178,88 @@ skip_if_empty = true
 # [[post_job.steps]]
 # type = "custom"
 # hook = "MyCustomHook"
+
+# ── New backends (Idea 3) ─────────────────────────────────────────────────
+# Uncomment and fill in the sections you want. Each backend is a Cargo feature.
+#
+# ── Postgres commit strategies ────────────────────────────────────────────
+# Default (active): tx_scope — one transaction per window
+# [[main_job.retry_steps]]
+# type            = "tx_upsert"
+# model           = "DbUser"
+# reads           = "db_rows"
+# commit_strategy = "tx_scope"      # default — omit to use tx_scope
+#
+# Autocommit — each row in its own tiny tx (partial success OK)
+# [[main_job.retry_steps]]
+# type            = "tx_upsert"
+# model           = "DbUser"
+# reads           = "db_rows"
+# commit_strategy = "autocommit"
+#
+# Bulk tx — accumulate all windows, commit once in post_loop (Case 2)
+# [slots.db_rows]
+# scope = "job"   # change from "window" to accumulate across windows
+# [[main_job.post_loop_steps]]
+# type            = "tx_upsert"
+# model           = "DbUser"
+# reads           = "db_rows"
+# commit_strategy = "bulk_tx"
+
+# ── Elasticsearch sink ────────────────────────────────────────────────────
+# Add to [features] in Cargo.toml: sync-engine = { features = ["elasticsearch"] }
+#
+# [resources.es]
+# type = "elasticsearch"
+# url  = { env = "ES_URL", default = "http://localhost:9200" }
+#
+# [[main_job.retry_steps]]
+# type  = "es_index"
+# model = "DbUser"       # must implement EsIndexable (impl es_id() -> String)
+# index = "users"
+# reads = "db_rows"
+# op    = "upsert"       # upsert (default) | delete | create
+#
+# ES as a source (fetch via scroll API):
+# [[main_job.retry_steps]]
+# type       = "es_fetch"
+# model      = "ApiUser"      # deserialized from ES _source
+# index      = "source-users"
+# writes     = "api_rows"
+# scroll_ttl = "1m"           # default
+# batch_size = 500            # default
+
+# ── Kafka sink + source ───────────────────────────────────────────────────
+# Add to [features] in Cargo.toml: sync-engine = { features = ["kafka"] }
+#
+# [resources.kafka]
+# type     = "kafka"
+# brokers  = { env = "KAFKA_BROKERS", default = "localhost:9092" }
+# group_id = { env = "KAFKA_GROUP_ID", default = "sync-engine" }
+# topic    = { env = "KAFKA_TOPIC" }   # required for consume trigger/source
+#
+# Kafka as sink (produce):
+# [[main_job.retry_steps]]
+# type      = "kafka_produce"
+# model     = "DbUser"
+# reads     = "db_rows"
+# topic     = { env = "KAFKA_SINK_TOPIC" }
+# key_field = "pccuid"   # optional — field name to use as message key
+#
+# Kafka as source (consume batch per window):
+# [[main_job.retry_steps]]
+# type         = "kafka_consume"
+# model        = "ApiUser"
+# writes       = "api_rows"
+# topic        = { env = "KAFKA_SOURCE_TOPIC" }
+# max_messages = 500     # default
+# timeout_ms   = 5000    # default
+#
+# RabbitMQ ack strategy (on send_to_queue steps):
+# [[main_job.retry_steps]]
+# type         = "send_to_queue"
+# reads        = "db_rows"
+# queue        = "db_rows"
+# ack_strategy = "ack_on_commit"    # default — ack after Postgres tx commits
+# ack_strategy = "ack_on_receive"   # fast — ack immediately on receive (at-most-once)
+# ack_strategy = "ack_per_batch"    # alias for ack_on_commit

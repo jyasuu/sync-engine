@@ -42,6 +42,61 @@ pub trait StepFactory: Send + Sync {
     ) -> Result<Box<dyn Step>> {
         Err(anyhow!("build_consumer not supported for this factory"))
     }
+
+    /// Build an AutocommitUpsertStep (postgres strategy: autocommit).
+    #[cfg(feature = "postgres")]
+    fn build_autocommit(&self, _params: &HashMap<String, String>) -> Result<Box<dyn Step>> {
+        Err(anyhow!("build_autocommit not supported for this factory"))
+    }
+
+    /// Build an EsIndexStep.
+    #[cfg(feature = "elasticsearch")]
+    fn build_es_index(
+        &self,
+        _reads: &str,
+        _index: &str,
+        _op:    crate::step::elasticsearch::EsOp,
+    ) -> Result<Box<dyn Step>> {
+        Err(anyhow!("build_es_index not supported for this factory"))
+    }
+
+    /// Build an EsFetchStep.
+    #[cfg(feature = "elasticsearch")]
+    fn build_es_fetch(
+        &self,
+        _writes:     &str,
+        _index:      &str,
+        _query:      Option<serde_json::Value>,
+        _scroll_ttl: &str,
+        _batch_size: i64,
+        _append:     bool,
+    ) -> Result<Box<dyn Step>> {
+        Err(anyhow!("build_es_fetch not supported for this factory"))
+    }
+
+    /// Build a KafkaProduceStep.
+    #[cfg(feature = "kafka")]
+    fn build_kafka_produce(
+        &self,
+        _reads:     &str,
+        _topic:     &str,
+        _key_field: Option<String>,
+    ) -> Result<Box<dyn Step>> {
+        Err(anyhow!("build_kafka_produce not supported for this factory"))
+    }
+
+    /// Build a KafkaConsumeStep.
+    #[cfg(feature = "kafka")]
+    fn build_kafka_consume(
+        &self,
+        _writes:       &str,
+        _topic:        &str,
+        _max_messages: usize,
+        _timeout_ms:   u64,
+        _append:       bool,
+    ) -> Result<Box<dyn Step>> {
+        Err(anyhow!("build_kafka_consume not supported for this factory"))
+    }
 }
 
 // ── TypeRegistry ──────────────────────────────────────────────────────────
@@ -92,6 +147,23 @@ impl TypeRegistry {
         let upsert_factory = ModelFactory::<T> { _phantom: std::marker::PhantomData };
         self.models.insert(name.to_owned(), Arc::new(upsert_factory));
         let queue_factory  = QueueSendFactory::<T> { _phantom: std::marker::PhantomData };
+        self.queue_sends.insert(name.to_owned(), Arc::new(queue_factory));
+    }
+
+    /// Register a model that also implements `EsIndexable`.
+    /// Supports both `es_index` / `es_fetch` steps AND `tx_upsert` / `spawn_consumer`.
+    /// Use this instead of `register_model` when the model is written to Elasticsearch.
+    #[cfg(all(feature = "elasticsearch", feature = "postgres"))]
+    pub fn register_model_es<T>(&mut self, name: &str)
+    where
+        T: crate::step::elasticsearch::EsIndexable
+            + UpsertableInTx
+            + serde::de::DeserializeOwned
+            + Any + Send + Sync + Clone + serde::Serialize + 'static,
+    {
+        let factory = Arc::new(EsModelFactory::<T> { _phantom: std::marker::PhantomData });
+        self.models.insert(name.to_owned(), Arc::clone(&factory) as Arc<dyn StepFactory>);
+        let queue_factory = QueueSendFactory::<T> { _phantom: std::marker::PhantomData };
         self.queue_sends.insert(name.to_owned(), Arc::new(queue_factory));
     }
 
@@ -164,6 +236,78 @@ impl TypeRegistry {
             .build(params)
     }
 
+    /// Build an AutocommitUpsertStep (postgres strategy: autocommit).
+    #[cfg(feature = "postgres")]
+    pub fn build_autocommit_sink(&self, name: &str, params: &HashMap<String, String>) -> Result<Box<dyn Step>> {
+        self.models.get(name)
+            .ok_or_else(|| anyhow!("Model \"{name}\" not registered — add registry.register_model::<{name}>(\"{name}\") in main.rs"))?
+            .build_autocommit(params)
+    }
+
+    /// Build an EsIndexStep for the given model.
+    #[cfg(feature = "elasticsearch")]
+    pub fn build_es_index(
+        &self,
+        name:  &str,
+        reads: &str,
+        index: &str,
+        op:    crate::step::elasticsearch::EsOp,
+    ) -> Result<Box<dyn Step>> {
+        self.models.get(name)
+            .or_else(|| self.envelopes.get(name))
+            .ok_or_else(|| anyhow!("Model/envelope \"{name}\" not registered"))?
+            .build_es_index(reads, index, op)
+    }
+
+    /// Build an EsFetchStep for the given model.
+    #[cfg(feature = "elasticsearch")]
+    pub fn build_es_fetch(
+        &self,
+        name:       &str,
+        writes:     &str,
+        index:      &str,
+        query:      Option<serde_json::Value>,
+        scroll_ttl: &str,
+        batch_size: i64,
+        append:     bool,
+    ) -> Result<Box<dyn Step>> {
+        self.envelopes.get(name)
+            .or_else(|| self.models.get(name))
+            .ok_or_else(|| anyhow!("Model/envelope \"{name}\" not registered"))?
+            .build_es_fetch(writes, index, query, scroll_ttl, batch_size, append)
+    }
+
+    /// Build a KafkaProduceStep for the given model.
+    #[cfg(feature = "kafka")]
+    pub fn build_kafka_produce(
+        &self,
+        name:      &str,
+        reads:     &str,
+        topic:     &str,
+        key_field: Option<String>,
+    ) -> Result<Box<dyn Step>> {
+        self.models.get(name)
+            .ok_or_else(|| anyhow!("Model \"{name}\" not registered"))?
+            .build_kafka_produce(reads, topic, key_field)
+    }
+
+    /// Build a KafkaConsumeStep for the given model.
+    #[cfg(feature = "kafka")]
+    pub fn build_kafka_consume(
+        &self,
+        name:         &str,
+        writes:       &str,
+        topic:        &str,
+        max_messages: usize,
+        timeout_ms:   u64,
+        append:       bool,
+    ) -> Result<Box<dyn Step>> {
+        self.envelopes.get(name)
+            .or_else(|| self.models.get(name))
+            .ok_or_else(|| anyhow!("Model/envelope \"{name}\" not registered"))?
+            .build_kafka_consume(writes, topic, max_messages, timeout_ms, append)
+    }
+
     pub fn get_post_hook(
         &self,
         name: &str,
@@ -231,6 +375,46 @@ where
                     accum_slot.unwrap_or_else(|| format!("__accum_{queue}")),
                 )),
         })
+    }
+
+    #[cfg(feature = "postgres")]
+    fn build_autocommit(&self, params: &HashMap<String, String>) -> Result<Box<dyn Step>> {
+        // AutocommitUpsertStep uses UpsertableInTx (one tx per row) — no extra trait needed.
+        let reads = params.get("reads").cloned().unwrap_or_else(|| "db_rows".into());
+        Ok(Box::new(crate::step::autocommit::AutocommitUpsertStep::<T>::new(reads)))
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    fn build_es_index(
+        &self,
+        reads: &str,
+        index: &str,
+        op:    crate::step::elasticsearch::EsOp,
+    ) -> Result<Box<dyn Step>>
+    where
+    {
+        use crate::step::elasticsearch::{EsIndexable, EsIndexStep};
+        // T must implement EsIndexable — enforced via register_model_es.
+        // We use a blanket approach: build the step and let the type checker validate.
+        struct Wrapper<U>(std::marker::PhantomData<U>);
+        // The step is generic over T; we just need T: EsIndexable here.
+        // Since ModelFactory<T> already requires T: Serialize + Send + Sync,
+        // and EsIndexable requires the same + es_id(), we cast via the trait.
+        Err(anyhow!(
+            "es_index on a model requires T to implement EsIndexable. \
+             Use registry.register_model_es::<T>(name) instead of register_model."
+        ))
+    }
+
+    #[cfg(feature = "kafka")]
+    fn build_kafka_produce(
+        &self,
+        reads:     &str,
+        topic:     &str,
+        key_field: Option<String>,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::kafka::KafkaProduceStep;
+        Ok(Box::new(KafkaProduceStep::<T>::new(reads, topic, key_field)))
     }
 }
 
@@ -303,5 +487,103 @@ where
         let writes = params.get("writes").cloned().unwrap_or_else(|| "api_rows".into());
         let append = params.get("append").map(|v| v == "true").unwrap_or(false);
         Ok(Box::new(crate::step::fetch::FetchJsonStep::<Env>::new(writes, append)))
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    fn build_es_fetch(
+        &self,
+        writes:     &str,
+        index:      &str,
+        query:      Option<serde_json::Value>,
+        scroll_ttl: &str,
+        batch_size: i64,
+        append:     bool,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::elasticsearch::EsFetchStep;
+        Ok(Box::new(EsFetchStep::<Env::Item>::new(
+            writes, index, query, scroll_ttl, batch_size, append,
+        )))
+    }
+
+    #[cfg(feature = "kafka")]
+    fn build_kafka_consume(
+        &self,
+        writes:       &str,
+        topic:        &str,
+        max_messages: usize,
+        timeout_ms:   u64,
+        append:       bool,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::kafka::KafkaConsumeStep;
+        Ok(Box::new(KafkaConsumeStep::<Env::Item>::new(
+            writes, topic, max_messages, timeout_ms, append,
+        )))
+    }
+}
+
+// ── EsModelFactory — for T: EsIndexable ──────────────────────────────────
+//
+// Used by register_model_es. Supports both es_index (sink) and postgres
+// tx_upsert (via UpsertableInTx), so a model can be written to both.
+
+#[cfg(feature = "elasticsearch")]
+struct EsModelFactory<T> {
+    _phantom: std::marker::PhantomData<T>,
+}
+
+#[cfg(all(feature = "elasticsearch", feature = "postgres"))]
+impl<T> StepFactory for EsModelFactory<T>
+where
+    T: crate::step::elasticsearch::EsIndexable
+        + UpsertableInTx
+        + serde::de::DeserializeOwned
+        + Any + Send + Sync + Clone + 'static,
+{
+    fn build(&self, params: &HashMap<String, String>) -> Result<Box<dyn Step>> {
+        let reads = params.get("reads").cloned().unwrap_or_else(|| "db_rows".into());
+        Ok(Box::new(crate::step::sink::TxUpsertStep::<T>::new(reads)))
+    }
+
+    fn build_es_index(
+        &self,
+        reads: &str,
+        index: &str,
+        op:    crate::step::elasticsearch::EsOp,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::elasticsearch::EsIndexStep;
+        Ok(Box::new(EsIndexStep::<T>::new(reads, index, op)))
+    }
+
+    fn build_es_fetch(
+        &self,
+        writes:     &str,
+        index:      &str,
+        query:      Option<serde_json::Value>,
+        scroll_ttl: &str,
+        batch_size: i64,
+        append:     bool,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::elasticsearch::EsFetchStep;
+        Ok(Box::new(EsFetchStep::<T>::new(
+            writes, index, query, scroll_ttl, batch_size, append,
+        )))
+    }
+
+    fn build_consumer(
+        &self,
+        queue: &str,
+        commit_mode: crate::step::consumer::CommitMode,
+        accum_slot:  Option<String>,
+    ) -> Result<Box<dyn Step>> {
+        use crate::step::consumer::{CommitMode, SpawnConsumerStep};
+        Ok(match commit_mode {
+            CommitMode::PerBatch =>
+                Box::new(SpawnConsumerStep::<T>::per_batch(queue)),
+            CommitMode::DrainInPostJob =>
+                Box::new(SpawnConsumerStep::<T>::drain_in_post_job(
+                    queue,
+                    accum_slot.unwrap_or_else(|| format!("__accum_{queue}")),
+                )),
+        })
     }
 }

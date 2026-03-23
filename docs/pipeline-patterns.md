@@ -80,7 +80,8 @@ post_job
 [job]
 name = "user-sync"
 
-[job.scheduler]
+[job.trigger]
+type = "cron"
 cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
 
 # ── Resources ─────────────────────────────────────────────────────────────
@@ -212,7 +213,8 @@ post_job
 [job]
 name = "user-sync"
 
-[job.scheduler]
+[job.trigger]
+type = "cron"
 cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
 
 [resources.pg]
@@ -337,7 +339,8 @@ post_job
 [job]
 name = "user-sync"
 
-[job.scheduler]
+[job.trigger]
+type = "cron"
 cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
 
 [resources.pg]
@@ -463,7 +466,8 @@ post_job  (identical to case 3)
 [job]
 name = "user-sync"
 
-[job.scheduler]
+[job.trigger]
+type = "cron"
 cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
 
 [resources.pg]
@@ -599,3 +603,137 @@ type = "send_to_queue"                        # case 3 & 4
 4. **Set environment variables** from `.env.example`.
 
 5. `cargo run` — the engine does the rest.
+
+---
+
+## Trigger types
+
+All four patterns share the same `run_one_tick()` core. Switch the trigger by changing `[job.trigger]` only — no Rust changes needed.
+
+| Type | Config | Best for |
+|------|--------|----------|
+| `cron` | `cron = "0 */30 * * * *"` | Scheduled sync (default) |
+| `once` | _(no extra fields)_ | CI, k8s Job, manual backfill |
+| `webhook` | `host`, `port` | Event-driven via HTTP POST |
+| `pg_notify` | `channel = "sync_trigger"` | Postgres LISTEN/NOTIFY |
+| `kafka` | `topic = { env = "..." }` | Kafka message-driven |
+
+```toml
+# cron (default)
+[job.trigger]
+type = "cron"
+cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+
+# once — run and exit
+[job.trigger]
+type = "once"
+
+# webhook — POST :8080 to fire
+[job.trigger]
+type = "webhook"
+port = 8080
+
+# pg_notify — LISTEN on a channel
+[job.trigger]
+type    = "pg_notify"
+channel = { env = "TRIGGER__PG_CHANNEL", default = "sync_trigger" }
+
+# kafka — each message fires a tick
+[job.trigger]
+type  = "kafka"
+topic = { env = "TRIGGER__KAFKA_TOPIC" }
+```
+
+---
+
+## Backend components (Idea 3)
+
+### Postgres commit strategies
+
+Set `commit_strategy` on any `tx_upsert` step:
+
+| Strategy | Behaviour | Use when |
+|----------|-----------|----------|
+| `tx_scope` | One tx per window (default) | Atomicity per window |
+| `autocommit` | One tx per row | Partial success OK, long windows |
+| `bulk_tx` | Accumulate; commit in `post_loop_steps` | Fewest total commits |
+
+```toml
+# autocommit — each row independently committed
+[[main_job.retry_steps]]
+type            = "tx_upsert"
+model           = "DbUser"
+reads           = "db_rows"
+commit_strategy = "autocommit"
+```
+
+### RabbitMQ ack strategies
+
+Set `ack_strategy` on `send_to_queue` steps backed by a RabbitMQ queue:
+
+| Strategy | Behaviour |
+|----------|-----------|
+| `ack_on_commit` | Ack after Postgres tx commits — at-least-once (default) |
+| `ack_on_receive` | Ack immediately — at-most-once, maximum throughput |
+| `ack_per_batch` | Alias for `ack_on_commit` |
+
+```toml
+[[main_job.retry_steps]]
+type         = "send_to_queue"
+reads        = "db_rows"
+queue        = "db_rows"
+ack_strategy = "ack_on_receive"   # fast path
+```
+
+### Elasticsearch
+
+Requires feature `elasticsearch`. Add `[resources.es]`, then use `es_index` (sink) or `es_fetch` (source).
+
+```toml
+[resources.es]
+type = "elasticsearch"
+url  = { env = "ES_URL", default = "http://localhost:9200" }
+
+# Sink — index documents
+[[main_job.retry_steps]]
+type  = "es_index"
+model = "DbUser"     # implement EsIndexable: fn es_id(&self) -> String
+index = "users"
+reads = "db_rows"
+op    = "upsert"     # upsert | delete | create
+
+# Source — scroll query
+[[main_job.retry_steps]]
+type   = "es_fetch"
+model  = "ApiUser"
+index  = "source-users"
+writes = "api_rows"
+```
+
+### Kafka
+
+Requires feature `kafka`. Add `[resources.kafka]`, then use `kafka_produce` (sink), `kafka_consume` (source), or `type = "kafka"` trigger.
+
+```toml
+[resources.kafka]
+type     = "kafka"
+brokers  = { env = "KAFKA_BROKERS", default = "localhost:9092" }
+group_id = { env = "KAFKA_GROUP_ID", default = "sync-engine" }
+topic    = { env = "KAFKA_TOPIC" }   # required for consume source/trigger
+
+# Sink — produce records
+[[main_job.retry_steps]]
+type      = "kafka_produce"
+model     = "DbUser"
+reads     = "db_rows"
+topic     = { env = "KAFKA_SINK_TOPIC" }
+key_field = "pccuid"   # optional
+
+# Source — consume batch per window
+[[main_job.retry_steps]]
+type         = "kafka_consume"
+model        = "ApiUser"
+writes       = "api_rows"
+topic        = { env = "KAFKA_SOURCE_TOPIC" }
+max_messages = 500
+```

@@ -12,10 +12,12 @@ path = "src/lib.rs"
 default  = ["postgres", "rabbitmq"]
 
 # Sink / source backends
-postgres = ["dep:sqlx"]
-rabbitmq = ["dep:lapin", "dep:futures-lite"]
-csv      = ["dep:csv", "dep:tokio-util"]
-excel    = ["dep:calamine", "dep:rust_xlsxwriter"]
+postgres      = ["dep:sqlx"]
+rabbitmq      = ["dep:lapin", "dep:futures-lite"]
+csv           = ["dep:csv", "dep:tokio-util"]
+excel         = ["dep:calamine", "dep:rust_xlsxwriter"]
+elasticsearch = []
+kafka         = ["dep:rdkafka", "dep:futures"]
 
 # ── Runtime dependencies ───────────────────────────────────────────────────
 [dependencies]
@@ -39,6 +41,8 @@ csv          = { version = "1",    optional = true }
 tokio-util   = { version = "0.7",  features = ["io"], optional = true }
 calamine     = { version = "0.24", optional = true }
 rust_xlsxwriter = { version = "0.75", optional = true }
+rdkafka      = { version = "0.36", features = ["cmake-build"], optional = true }
+futures      = { version = "0.3",  optional = true }
 
 [build-dependencies]
 toml  = "0.8"

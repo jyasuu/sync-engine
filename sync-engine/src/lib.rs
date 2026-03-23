@@ -52,6 +52,14 @@ pub use step::sink::SendToQueueStep;
 pub use step::sink::TxUpsertStep;
 pub use step::transform::TransformStep;
 
+// ── New backend steps ─────────────────────────────────────────────────────
+#[cfg(feature = "postgres")]
+pub use step::autocommit::AutocommitUpsertStep;
+#[cfg(feature = "elasticsearch")]
+pub use step::elasticsearch::{EsOp, EsIndexable, EsIndexStep, EsFetchStep};
+#[cfg(feature = "kafka")]
+pub use step::kafka::{KafkaProduceStep, KafkaConsumeStep};
+
 // ── File sinks ────────────────────────────────────────────────────────────
 pub use sinks::FileSink;
 #[cfg(feature = "csv")]
@@ -65,11 +73,13 @@ pub use transport::{RabbitmqConfig, RabbitmqConsumer, RabbitmqProducer, Rabbitmq
 
 // ── TypeRegistry + run() entry-point ─────────────────────────────────────
 pub use registry::TypeRegistry;
+// register_model_es is a method on TypeRegistry, available when features
+// "elasticsearch" + "postgres" are both enabled. No separate re-export needed.
 pub use pipeline_runner::{
     run, validate, build_context, build_window_cfg, build_steps,
     PipelineConfig, ResourceDef, SlotDef, SlotScopeStr, QueueDef,
     PreJobConfig, MainJobConfig, MainStepConfig, IteratorConfig, RetryConfig,
-    PostJobConfig, PostStepConfig, SchedulerConfig,
+    PostJobConfig, PostStepConfig, SchedulerConfig, TriggerConfig,
 };
 
 // ── StandardJob (legacy) ──────────────────────────────────────────────────
