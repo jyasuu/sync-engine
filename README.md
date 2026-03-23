@@ -251,3 +251,184 @@ cd user-sync && cargo run   # dotenvy picks up .env automatically
 # Test with a single window
 SOURCE__START_INTERVAL=1 SOURCE__END_INTERVAL=0 SOURCE__INTERVAL_LIMIT=1 cargo run
 ```
+
+---
+
+## Trigger types
+
+All patterns share the same `run_one_tick()` core. Switch with `[job.trigger]` only — no Rust changes needed. The legacy `[job.scheduler]` key is still accepted as a cron alias.
+
+| Type | Config | Best for |
+|------|--------|----------|
+| `cron` | `cron = "0 */30 * * * *"` | Scheduled sync (default) |
+| `once` | _(no extra fields)_ | CI, k8s Job, manual backfill |
+| `webhook` | `host`, `port` | Event-driven via HTTP POST |
+| `pg_notify` | `channel` | Postgres LISTEN/NOTIFY |
+| `kafka` | `topic` | Kafka message-driven |
+
+```toml
+[job.trigger]
+type = "pg_notify"
+channel = { env = "TRIGGER__PG_CHANNEL", default = "sync_trigger" }
+```
+
+See `docs/examples/case5` through `case7` for full working examples.
+
+---
+
+## `[init_job]` — one-time startup stage
+
+`[init_job]` runs once after `build_context` and `validate`, before the trigger loop. Use it for migrations, connectivity checks, and pre-seeding pipeline-scoped slots that every tick can read.
+
+```toml
+[[init_job.steps]]
+type          = "raw_sql"
+sql           = { env = "INIT__MIGRATION_SQL", default = "" }
+skip_if_empty = true
+
+[[init_job.steps]]
+type = "custom"
+hook = "WarmLookupCache"   # registered in main.rs
+```
+
+Pipeline-scoped slots written in `init_job` survive all ticks. See `docs/examples/case11-init-job.toml`.
+
+**Lifecycle:**
+```
+program start → build_context → validate → [init_job] → trigger loop
+                                                              ↓ (per tick)
+                                              pre_job → main_job → post_job
+```
+
+---
+
+## Complex transform patterns
+
+### `split_transform` — fan-out
+
+Apply multiple registered transforms to the same source slot, each writing to a different output slot. Use when one API record maps to multiple DB tables.
+
+```toml
+[[main_job.retry_steps]]
+type   = "split_transform"
+reads  = "api_rows"
+transforms = [
+  { transform = "UserTransform",     writes = "db_users" },
+  { transform = "UserRoleTransform", writes = "db_roles" },
+]
+```
+
+Register both transforms in `main.rs`:
+```rust
+registry.register_transform::<ApiUser, DbUser, UserTransform>("UserTransform");
+registry.register_transform::<ApiUser, DbUserRole, UserRoleTransform>("UserRoleTransform");
+```
+
+### `merge_slots` — fan-in
+
+Concatenate multiple same-typed slots into one before a single sink. Use when data arrives from multiple upstream sources.
+
+```toml
+[[main_job.retry_steps]]
+type        = "merge_slots"
+model       = "DbUser"
+merge_reads = ["db_rows_primary", "db_rows_legacy"]
+writes      = "db_rows_all"
+```
+
+### `slot_to_json` / `json_to_slot` — JSON passthrough
+
+Serialize any typed slot to `Vec<serde_json::Value>` and back. Enables ES indexing without `EsIndexable`, Kafka JSON bridging, and JSONB audit columns.
+
+```toml
+[[main_job.retry_steps]]
+type   = "slot_to_json"
+model  = "DbUser"
+reads  = "db_rows"
+writes = "db_rows_json"
+```
+
+---
+
+## Backend components (optional features)
+
+Add to `Cargo.toml` as needed:
+```toml
+sync-engine = { features = ["elasticsearch", "kafka"] }
+```
+
+### Postgres commit strategies
+
+Set `commit_strategy` on any `tx_upsert` step:
+
+| Strategy | Behaviour |
+|----------|-----------|
+| `tx_scope` | One transaction per window (default) |
+| `autocommit` | One transaction per row — partial success OK |
+| `bulk_tx` | Accumulate all windows, commit once in `post_loop_steps` |
+
+### RabbitMQ ack strategies
+
+Set `ack_strategy` on `send_to_queue` steps backed by a RabbitMQ queue:
+
+| Strategy | Behaviour |
+|----------|-----------|
+| `ack_on_commit` | Ack after Postgres tx commits — at-least-once (default) |
+| `ack_on_receive` | Ack immediately — at-most-once, maximum throughput |
+
+### Elasticsearch (`feature = "elasticsearch"`)
+
+Sink (`es_index`) or source (`es_fetch`) via the ES REST API over reqwest — no extra crate needed.
+
+```toml
+[resources.es]
+type = "elasticsearch"
+url  = { env = "ES_URL", default = "http://localhost:9200" }
+
+[[main_job.retry_steps]]
+type  = "es_index"
+model = "DbUser"     # implement EsIndexable: fn es_id(&self) -> String
+index = "users"
+reads = "db_rows"
+op    = "upsert"     # upsert | delete | create
+```
+
+Register with `registry.register_model_es::<DbUser>("DbUser")` instead of `register_model`.
+
+### Kafka (`feature = "kafka"`)
+
+Produce (sink), consume (source), or trigger:
+
+```toml
+[resources.kafka]
+type    = "kafka"
+brokers = { env = "KAFKA_BROKERS", default = "localhost:9092" }
+
+# Sink
+[[main_job.retry_steps]]
+type  = "kafka_produce"
+model = "DbUser"
+topic = { env = "KAFKA_SINK_TOPIC" }
+
+# Trigger
+[job.trigger]
+type  = "kafka"
+topic = { env = "TRIGGER__KAFKA_TOPIC" }
+```
+
+---
+
+## Architecture diagram
+
+`build.rs` generates `ARCHITECTURE.svg` (standalone, viewable in browser, diffable in git) and `ARCHITECTURE.md` (embeds the SVG). The diagram shows the full lifecycle — startup → `[init_job]` → trigger type → per-tick phases — alongside the schema and pipeline sections.
+
+```rust
+// user-sync/build.rs
+fn main() {
+    sync_engine::codegen::generate("schema.toml");
+    sync_engine::codegen::generate_pipeline_skeleton("schema.toml", "pipeline.toml");
+    sync_engine::codegen::generate_config_doc("config.toml", "schema.toml", "CONFIG.md");
+    sync_engine::codegen::generate_architecture_svg_file("schema.toml", "pipeline.toml", "ARCHITECTURE.svg");
+    sync_engine::codegen::generate_architecture_svg("schema.toml", "pipeline.toml", "ARCHITECTURE.md", "ARCHITECTURE.svg");
+}
+```

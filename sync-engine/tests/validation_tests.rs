@@ -8,7 +8,7 @@ use sync_engine::{TypeRegistry, validate};
 use sync_engine::pipeline_runner::{
     PipelineConfig, PreJobConfig, MainJobConfig, MainStepConfig,
     PostJobConfig, PostStepConfig, IteratorConfig, RetryConfig,
-    SlotDef,
+    SlotDef, SplitTransformEntry,
 };
 use sync_engine::config_value::ConfigValue;
 
@@ -17,6 +17,7 @@ use sync_engine::config_value::ConfigValue;
 fn minimal_cfg(retry_steps: Vec<MainStepConfig>) -> PipelineConfig {
     PipelineConfig {
         job:       None,
+        init_job:  None,
         resources: HashMap::new(),
         slots: {
             let mut m = HashMap::new();
@@ -49,18 +50,48 @@ fn minimal_cfg(retry_steps: Vec<MainStepConfig>) -> PipelineConfig {
     }
 }
 
+fn cfg_with_extra_slots(retry_steps: Vec<MainStepConfig>, extra: &[&str]) -> PipelineConfig {
+    let mut cfg = minimal_cfg(retry_steps);
+    for name in extra {
+        cfg.slots.insert((*name).into(), SlotDef {
+            record_type: None,
+            scope: sync_engine::pipeline_runner::SlotScopeStr::Window,
+        });
+    }
+    cfg
+}
+
 fn empty_registry() -> TypeRegistry { TypeRegistry::new() }
 
 fn step(type_: &str) -> MainStepConfig {
     MainStepConfig {
-        step_type:     type_.into(),
-        envelope:      None, transform: None, model: None,
-        reads: None, writes: None, append: false,
-        secs: None, sql: None, skip_if_empty: false, queue: None,
+        step_type:       type_.into(),
+        envelope:        None,
+        transform:       None,
+        model:           None,
+        reads:           None,
+        writes:          None,
+        append:          false,
+        secs:            None,
+        sql:             None,
+        skip_if_empty:   false,
+        queue:           None,
+        commit_strategy: None,
+        ack_strategy:    None,
+        index:           None,
+        op:              None,
+        scroll_ttl:      None,
+        batch_size:      None,
+        topic:           None,
+        key_field:       None,
+        max_messages:    None,
+        timeout_ms:      None,
+        transforms:      vec![],
+        merge_reads:     vec![],
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
+// ── Original tests ─────────────────────────────────────────────────────────
 
 #[test]
 fn valid_empty_pipeline_passes() {
@@ -109,7 +140,6 @@ fn send_to_queue_undeclared_queue_errors() {
     s.queue = Some("undeclared_queue".into());
     let cfg = minimal_cfg(vec![s]);
     let err = validate(&cfg, &empty_registry()).unwrap_err().to_string();
-    // Either "not registered" (model) or "not declared" (queue)
     assert!(err.contains("undeclared_queue") || err.contains("not registered"), "got: {err}");
 }
 
@@ -125,7 +155,7 @@ fn unknown_step_type_errors() {
 fn step_reads_undeclared_slot_errors() {
     let mut s = step("tx_upsert");
     s.model = Some("DbUser".into());
-    s.reads = Some("ghost_slot".into());    // not in [slots]
+    s.reads = Some("ghost_slot".into());
     let cfg = minimal_cfg(vec![s]);
     let err = validate(&cfg, &empty_registry()).unwrap_err().to_string();
     assert!(err.contains("ghost_slot"), "got: {err}");
@@ -135,13 +165,171 @@ fn step_reads_undeclared_slot_errors() {
 fn multiple_errors_all_reported() {
     let steps = vec![
         { let mut s = step("fetch"); s.envelope = Some("MissingEnv".into()); s.writes = Some("api_rows".into()); s },
-        { let s = step("transform"); s },  // missing transform field
-        { let s = step("tx_upsert");  s },  // missing model field
+        { step("transform") },  // missing transform field
+        { step("tx_upsert") },  // missing model field
     ];
     let cfg = minimal_cfg(steps);
     let err = validate(&cfg, &empty_registry()).unwrap_err().to_string();
-    // All three errors should appear in a single message
     assert!(err.contains("MissingEnv"),        "got: {err}");
     assert!(err.contains("`transform` field"), "got: {err}");
     assert!(err.contains("`model` field"),     "got: {err}");
 }
+
+// ── New step type validation tests ─────────────────────────────────────────
+
+#[test]
+fn split_transform_missing_transforms_array_errors() {
+    let s = step("split_transform"); // transforms vec is empty
+    let cfg = minimal_cfg(vec![s]);
+    let err = validate(&cfg, &empty_registry()).unwrap_err().to_string();
+    assert!(err.contains("missing `transforms` array"), "got: {err}");
+}
+
+#[test]
+fn split_transform_unregistered_transform_errors() {
+    let mut s = step("split_transform");
+    s.reads = Some("api_rows".into());
+    s.transforms = vec![
+        SplitTransformEntry { transform: "NoSuchTransform".into(), writes: "db_rows".into(), append: false },
+    ];
+    let cfg = minimal_cfg(vec![s]);
+    let err = validate(&cfg, &empty_registry()).unwrap_err().to_string();
+    assert!(err.contains("NoSuchTransform"), "got: {err}");
+    assert!(err.contains("not registered"), "got: {err}");
+}
+
+#[test]
+fn split_transform_undeclared_writes_slot_errors() {
+    let mut s = step("split_transform");
+    s.reads = Some("api_rows".into());
+    s.transforms = vec![
+        SplitTransformEntry {
+            transform: "UserTransform".into(),
+            writes:    "ghost_output".into(),  // not declared in [slots]
+            append:    false,
+        },
+    ];
+    let cfg = minimal_cfg(vec![s]);
+    let err = validate(&cfg, &empty_registry()).unwrap_err().to_string();
+    assert!(err.contains("ghost_output"), "got: {err}");
+}
+
+#[test]
+fn merge_slots_missing_merge_reads_errors() {
+    let mut s = step("merge_slots");
+    s.model  = Some("DbUser".into());
+    s.writes = Some("db_rows".into());
+    // merge_reads is empty — error expected
+    let cfg = minimal_cfg(vec![s]);
+    let err = validate(&cfg, &empty_registry()).unwrap_err().to_string();
+    assert!(err.contains("missing `merge_reads` array"), "got: {err}");
+}
+
+#[test]
+fn merge_slots_missing_writes_errors() {
+    let mut s = step("merge_slots");
+    s.model       = Some("DbUser".into());
+    s.merge_reads = vec!["api_rows".into()];
+    // writes is None — error expected
+    let cfg = minimal_cfg(vec![s]);
+    let err = validate(&cfg, &empty_registry()).unwrap_err().to_string();
+    assert!(err.contains("missing `writes` field"), "got: {err}");
+}
+
+#[test]
+fn merge_slots_missing_model_errors() {
+    let mut s = step("merge_slots");
+    s.merge_reads = vec!["api_rows".into()];
+    s.writes      = Some("db_rows".into());
+    // model is None — error expected
+    let cfg = minimal_cfg(vec![s]);
+    let err = validate(&cfg, &empty_registry()).unwrap_err().to_string();
+    assert!(err.contains("missing `model` field"), "got: {err}");
+}
+
+#[test]
+fn slot_to_json_missing_fields_errors() {
+    let s = step("slot_to_json"); // reads, writes, model all None
+    let cfg = minimal_cfg(vec![s]);
+    let err = validate(&cfg, &empty_registry()).unwrap_err().to_string();
+    assert!(err.contains("missing `reads` field"),  "got: {err}");
+    assert!(err.contains("missing `writes` field"), "got: {err}");
+    assert!(err.contains("missing `model` field"),  "got: {err}");
+}
+
+#[test]
+fn json_to_slot_missing_fields_errors() {
+    let s = step("json_to_slot"); // reads, writes, model all None
+    let cfg = minimal_cfg(vec![s]);
+    let err = validate(&cfg, &empty_registry()).unwrap_err().to_string();
+    assert!(err.contains("missing `reads` field"),  "got: {err}");
+    assert!(err.contains("missing `writes` field"), "got: {err}");
+    assert!(err.contains("missing `model` field"),  "got: {err}");
+}
+
+#[test]
+fn slot_to_json_valid_fields_pass_slot_check() {
+    let mut s = step("slot_to_json");
+    s.model  = Some("DbUser".into());
+    s.reads  = Some("api_rows".into());    // declared in minimal_cfg
+    s.writes = Some("db_rows".into());     // declared in minimal_cfg
+    let cfg = minimal_cfg(vec![s]);
+    // No "ghost slot" or "missing field" errors — only possible model/registry errors
+    let err = validate(&cfg, &empty_registry())
+        .err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(!err.contains("ghost"), "slot check should pass: {err}");
+    assert!(!err.contains("missing `reads`"), "reads present: {err}");
+    assert!(!err.contains("missing `writes`"), "writes present: {err}");
+}
+
+// ── commit_strategy and ack_strategy validation tests ─────────────────────
+
+#[test]
+fn commit_strategy_invalid_value_errors() {
+    let mut s = step("tx_upsert");
+    s.model           = Some("DbUser".into());
+    s.reads           = Some("db_rows".into());
+    s.commit_strategy = Some("per_row_magic".into());
+    let cfg = minimal_cfg(vec![s]);
+    let err = validate(&cfg, &empty_registry()).unwrap_err().to_string();
+    assert!(err.contains("per_row_magic"), "got: {err}");
+    assert!(err.contains("commit_strategy"), "got: {err}");
+}
+
+#[test]
+fn commit_strategy_valid_values_pass() {
+    for strategy in &["tx_scope", "autocommit", "bulk_tx"] {
+        let mut s = step("tx_upsert");
+        s.model           = Some("DbUser".into());
+        s.reads           = Some("db_rows".into());
+        s.commit_strategy = Some((*strategy).into());
+        let cfg = minimal_cfg(vec![s]);
+        let err = validate(&cfg, &empty_registry())
+            .err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(!err.contains("commit_strategy"), "valid strategy {strategy} should not error: {err}");
+    }
+}
+
+#[test]
+fn commit_strategy_on_wrong_step_type_errors() {
+    let mut s = step("fetch");
+    s.envelope        = Some("Env".into());
+    s.writes          = Some("api_rows".into());
+    s.commit_strategy = Some("tx_scope".into());
+    let cfg = minimal_cfg(vec![s]);
+    let err = validate(&cfg, &empty_registry()).unwrap_err().to_string();
+    assert!(err.contains("commit_strategy") && err.contains("tx_upsert"), "got: {err}");
+}
+
+#[test]
+fn ack_strategy_invalid_value_errors() {
+    let mut s = step("send_to_queue");
+    s.model        = Some("DbUser".into());
+    s.reads        = Some("db_rows".into());
+    s.queue        = Some("db_rows".into());
+    s.ack_strategy = Some("unknown_ack".into());
+    let cfg = cfg_with_extra_slots(vec![s], &[]);
+    let err = validate(&cfg, &empty_registry()).unwrap_err().to_string();
+    assert!(err.contains("unknown_ack"), "got: {err}");
+}
+

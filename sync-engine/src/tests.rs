@@ -465,3 +465,237 @@ backoff_secs = 1
         assert!(!err_str.contains("not supported"), "valid type should not produce unsupported error");
     }
 }
+
+#[cfg(all(test, not(feature = "postgres")))]
+mod json_slot_tests {
+    use std::sync::Arc;
+    use serde::{Deserialize, Serialize};
+
+    use crate::context::{Connections, JobContext};
+    use crate::slot::SlotScope;
+    use crate::step::Step;
+    use crate::step::json_slot::{SlotToJsonStep, JsonToSlotStep};
+    use crate::components::auth::OAuth2Auth;
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Row { id: u32, name: String }
+
+
+
+    // Simpler approach: test the round-trip logic directly via a context
+    // that only uses the slot map.
+    #[tokio::test]
+    async fn slot_to_json_serializes_typed_slot() {
+        let ctx = make_minimal_ctx();
+        {
+            let mut slots = ctx.slots.write().await;
+            slots.declare("rows", SlotScope::Window);
+            slots.declare("json", SlotScope::Window);
+        }
+        let rows = vec![
+            Row { id: 1, name: "alice".into() },
+            Row { id: 2, name: "bob".into() },
+        ];
+        ctx.slot_write("rows", rows.clone()).await.unwrap();
+
+        let step = SlotToJsonStep::<Row>::new("rows", "json", false);
+        step.run(&ctx).await.unwrap();
+
+        let json: Vec<serde_json::Value> = ctx.slot_read("json").await.unwrap();
+        assert_eq!(json.len(), 2);
+        assert_eq!(json[0]["id"], 1);
+        assert_eq!(json[1]["name"], "bob");
+    }
+
+    #[tokio::test]
+    async fn json_to_slot_deserializes_back() {
+        let ctx = make_minimal_ctx();
+        {
+            let mut slots = ctx.slots.write().await;
+            slots.declare("json", SlotScope::Window);
+            slots.declare("rows", SlotScope::Window);
+        }
+
+        let json_vals = vec![
+            serde_json::json!({"id": 10, "name": "carol"}),
+            serde_json::json!({"id": 20, "name": "dave"}),
+        ];
+        ctx.slot_write("json", json_vals).await.unwrap();
+
+        let step = JsonToSlotStep::<Row>::new("json", "rows", false);
+        step.run(&ctx).await.unwrap();
+
+        let rows: Vec<Row> = ctx.slot_read("rows").await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], Row { id: 10, name: "carol".into() });
+        assert_eq!(rows[1], Row { id: 20, name: "dave".into() });
+    }
+
+    #[tokio::test]
+    async fn slot_to_json_then_json_to_slot_round_trips() {
+        let ctx = make_minimal_ctx();
+        {
+            let mut slots = ctx.slots.write().await;
+            slots.declare("original", SlotScope::Window);
+            slots.declare("json",     SlotScope::Window);
+            slots.declare("restored", SlotScope::Window);
+        }
+
+        let original = vec![
+            Row { id: 1, name: "foo".into() },
+            Row { id: 2, name: "bar".into() },
+        ];
+        ctx.slot_write("original", original.clone()).await.unwrap();
+
+        SlotToJsonStep::<Row>::new("original", "json", false)
+            .run(&ctx).await.unwrap();
+        JsonToSlotStep::<Row>::new("json", "restored", false)
+            .run(&ctx).await.unwrap();
+
+        let restored: Vec<Row> = ctx.slot_read("restored").await.unwrap();
+        assert_eq!(restored, original);
+    }
+
+    #[tokio::test]
+    async fn json_to_slot_skips_bad_rows_and_continues() {
+        let ctx = make_minimal_ctx();
+        {
+            let mut slots = ctx.slots.write().await;
+            slots.declare("json", SlotScope::Window);
+            slots.declare("rows", SlotScope::Window);
+        }
+
+        let json_vals = vec![
+            serde_json::json!({"id": 1, "name": "ok"}),
+            serde_json::json!({"bad_field": true}),      // missing required fields
+            serde_json::json!({"id": 3, "name": "also_ok"}),
+        ];
+        ctx.slot_write("json", json_vals).await.unwrap();
+
+        let step = JsonToSlotStep::<Row>::new("json", "rows", false);
+        // Should succeed — bad rows are skipped with a warn log
+        step.run(&ctx).await.unwrap();
+
+        let rows: Vec<Row> = ctx.slot_read("rows").await.unwrap();
+        assert_eq!(rows.len(), 2, "bad row should be skipped");
+        assert_eq!(rows[0].id, 1);
+        assert_eq!(rows[1].id, 3);
+    }
+
+    fn make_minimal_ctx() -> Arc<JobContext> {
+        use std::collections::HashMap;
+        use crate::components::auth::OAuth2Auth;
+        let connections = crate::context::Connections {
+
+            auth:        Arc::new(OAuth2Auth::new(
+                reqwest::Client::new(),
+                "http://unused".into(),
+                "id".into(),
+                "secret".into(),
+            )),
+            http:        reqwest::Client::new(),
+            endpoint:    String::new(),
+            extra_query: vec![],
+            start_param: "start_time".into(),
+            end_param:   "end_time".into(),
+            date_format: "%Y%m%d".into(),
+        };
+        Arc::new(JobContext::new(connections, HashMap::new(), "test"))
+    }
+}
+
+#[cfg(all(test, not(feature = "postgres")))]
+mod merge_slots_tests {
+    use std::sync::Arc;
+    use std::collections::HashMap;
+    use serde::{Deserialize, Serialize};
+
+    use crate::context::JobContext;
+    use crate::slot::SlotScope;
+    use crate::step::Step;
+    use crate::step::multi_transform::MergeSlotsStep;
+    use crate::components::auth::OAuth2Auth;
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Item { id: u32 }
+
+    fn make_ctx() -> Arc<JobContext> {
+        let connections = crate::context::Connections {
+            auth:        Arc::new(OAuth2Auth::new(
+                reqwest::Client::new(),
+                "http://unused".into(),
+                "id".into(),
+                "secret".into(),
+            )),
+            http:        reqwest::Client::new(),
+            endpoint:    String::new(),
+            extra_query: vec![],
+            start_param: "start_time".into(),
+            end_param:   "end_time".into(),
+            date_format: "%Y%m%d".into(),
+        };
+        Arc::new(JobContext::new(connections, HashMap::new(), "test"))
+    }
+
+    #[tokio::test]
+    async fn merges_two_slots_into_one() {
+        let ctx = make_ctx();
+        {
+            let mut slots = ctx.slots.write().await;
+            slots.declare("a",      SlotScope::Window);
+            slots.declare("b",      SlotScope::Window);
+            slots.declare("merged", SlotScope::Window);
+        }
+
+        ctx.slot_write("a", vec![Item { id: 1 }, Item { id: 2 }]).await.unwrap();
+        ctx.slot_write("b", vec![Item { id: 3 }]).await.unwrap();
+
+        let step = MergeSlotsStep::<Item>::new(
+            vec!["a".into(), "b".into()], "merged", false,
+        );
+        step.run(&ctx).await.unwrap();
+
+        let merged: Vec<Item> = ctx.slot_read("merged").await.unwrap();
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].id, 1);
+        assert_eq!(merged[2].id, 3);
+    }
+
+    #[tokio::test]
+    async fn merge_with_append_grows_target() {
+        let ctx = make_ctx();
+        {
+            let mut slots = ctx.slots.write().await;
+            slots.declare("src",    SlotScope::Window);
+            slots.declare("target", SlotScope::Window);
+        }
+
+        ctx.slot_write("target", vec![Item { id: 10 }]).await.unwrap();
+        ctx.slot_write("src",    vec![Item { id: 20 }]).await.unwrap();
+
+        let step = MergeSlotsStep::<Item>::new(vec!["src".into()], "target", true);
+        step.run(&ctx).await.unwrap();
+
+        let result: Vec<Item> = ctx.slot_read("target").await.unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].id, 10);
+        assert_eq!(result[1].id, 20);
+    }
+
+    #[tokio::test]
+    async fn merge_empty_source_produces_empty_target() {
+        let ctx = make_ctx();
+        {
+            let mut slots = ctx.slots.write().await;
+            slots.declare("empty",  SlotScope::Window);
+            slots.declare("output", SlotScope::Window);
+        }
+        // "empty" slot is declared but never written — should be skipped gracefully
+
+        let step = MergeSlotsStep::<Item>::new(vec!["empty".into()], "output", false);
+        step.run(&ctx).await.unwrap();
+
+        let result: Vec<Item> = ctx.slot_read("output").await.unwrap_or_default();
+        assert_eq!(result.len(), 0);
+    }
+}
