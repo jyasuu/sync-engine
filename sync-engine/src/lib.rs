@@ -63,6 +63,9 @@ pub use step::kafka::{KafkaProduceStep, KafkaConsumeStep};
 // ── Complex transform steps ───────────────────────────────────────────────
 pub use step::multi_transform::{SplitTransformStep, MergeSlotsStep};
 pub use step::json_slot::{SlotToJsonStep, JsonToSlotStep};
+pub use step::wrappers::{WindowLoopStep, RetryStep};
+#[cfg(feature = "postgres")]
+pub use step::wrappers::TxStep;
 
 // ── File sinks ────────────────────────────────────────────────────────────
 pub use sinks::FileSink;

@@ -32,6 +32,7 @@ use crate::components::auth::OAuth2Auth;
 use crate::config_value::ConfigValue;
 use crate::context::{Connections, JobContext};
 use crate::registry::TypeRegistry;
+#[allow(unused_imports)]
 use crate::runner::{MainJobRunner, WindowConfig};
 use crate::slot::SlotScope;
 use crate::step::StepRunner;
@@ -54,6 +55,24 @@ pub struct PipelineConfig {
     pub slots:     HashMap<String, SlotDef>,
     #[serde(default)]
     pub queues:    HashMap<String, QueueDef>,
+    /// Named step groups — referenced by wrapper steps via `group = "name"`.
+    /// Keeps complex pipelines readable by naming reusable sub-sequences.
+    ///
+    /// ```toml
+    /// [step_groups.fetch_and_transform]
+    /// steps = [
+    ///   { type = "fetch",     envelope = "ApiUserResponse", writes = "api_rows" },
+    ///   { type = "transform", transform = "UserTransform",  reads = "api_rows", writes = "db_rows" },
+    ///   { type = "tx", group = "commit_users" },
+    /// ]
+    ///
+    /// [[main_job.steps]]
+    /// type         = "retry"
+    /// max_attempts = 5
+    /// group        = "fetch_and_transform"
+    /// ```
+    #[serde(default)]
+    pub step_groups: HashMap<String, StepGroupConfig>,
     /// Runs once at startup after build_context, before the trigger loop.
     /// Pipeline-scoped slots written here survive into every tick.
     #[serde(default)]
@@ -61,6 +80,12 @@ pub struct PipelineConfig {
     pub pre_job:   PreJobConfig,
     pub main_job:  MainJobConfig,
     pub post_job:  PostJobConfig,
+}
+
+/// A named, reusable sequence of steps referenced via `group = "name"`.
+#[derive(Debug, Deserialize, Clone)]
+pub struct StepGroupConfig {
+    pub steps: Vec<MainStepConfig>,
 }
 
 // ── [job] ─────────────────────────────────────────────────────────────────
@@ -308,10 +333,19 @@ pub enum CommitModeStr { PerBatch, DrainInPostJob }
 
 // ── [main_job] ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct MainJobConfig {
-    pub iterator:           IteratorConfig,
-    pub retry:              RetryConfig,
+    /// Required for legacy pipelines; unused when [[main_job.steps]] is present.
+    #[serde(default)]
+    pub iterator:           Option<IteratorConfig>,
+    /// Required for legacy pipelines; unused when [[main_job.steps]] is present.
+    #[serde(default)]
+    pub retry:              Option<RetryConfig>,
+    /// New composable style — wrapper + leaf steps at any nesting depth.
+    /// When non-empty, `iterator`, `retry`, and `*_steps` are ignored.
+    #[serde(default)]
+    pub steps:              Vec<MainStepConfig>,
+    // ── Legacy flat fields (desugared into `steps` at runtime) ───────────
     #[serde(default)]
     pub retry_steps:        Vec<MainStepConfig>,
     #[serde(default)]
@@ -320,7 +354,7 @@ pub struct MainJobConfig {
     pub post_loop_steps:    Vec<MainStepConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct IteratorConfig {
     #[serde(rename = "type")]
     pub iter_type:      String,
@@ -330,7 +364,7 @@ pub struct IteratorConfig {
     pub sleep_secs:     ConfigValue,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct RetryConfig {
     #[serde(default = "default_attempts")]
     pub max_attempts:  usize,
@@ -340,9 +374,15 @@ pub struct RetryConfig {
 fn default_attempts() -> usize { 5 }
 fn default_backoff()  -> u64   { 2 }
 
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self { max_attempts: default_attempts(), backoff_secs: default_backoff() }
+    }
+}
+
 /// A step entry in [[main_job.retry_steps]] or [[main_job.post_loop_steps]].
 /// The `type` field drives dispatch; all other fields are passed as `params`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default, Clone)]
 pub struct MainStepConfig {
     #[serde(rename = "type")]
     pub step_type: String,
@@ -419,6 +459,32 @@ pub struct MainStepConfig {
     /// ```
     #[serde(default)]
     pub merge_reads: Vec<String>,
+
+    // ── Wrapper step fields ───────────────────────────────────────────────
+    // Used when step_type is "window_loop", "retry", or "tx".
+    // These steps contain and drive a child list rather than performing leaf
+    // work directly.  Any step — including other wrappers — can appear inside.
+
+    /// Child steps owned by a wrapper step.
+    /// Populated when type = "window_loop" | "retry" | "tx".
+    #[serde(default)]
+    pub steps: Vec<MainStepConfig>,
+
+    // window_loop-specific
+    pub start_interval: Option<ConfigValue>,
+    pub end_interval:   Option<ConfigValue>,
+    pub interval_limit: Option<ConfigValue>,
+    pub sleep_secs:     Option<ConfigValue>,
+
+    // retry-specific
+    pub max_attempts:  Option<usize>,
+    pub backoff_secs:  Option<u64>,
+
+    /// Reference to a named [step_groups.*] block.
+    /// Used by wrapper steps (window_loop, retry, tx) as an alternative to
+    /// inline `steps = [...]`.  Cannot be combined with inline steps on the
+    /// same wrapper.
+    pub group: Option<String>,
 }
 
 /// One entry inside `split_transform.transforms`.
@@ -568,18 +634,67 @@ pub fn validate(cfg: &PipelineConfig, registry: &TypeRegistry) -> Result<()> {
         }
     }
 
-    // Validate iterator type
-    let iter_type = cfg.main_job.iterator.iter_type.as_str();
-    if iter_type != "date_window" {
-        errors.push(format!(
-            "[main_job.iterator] type \"{iter_type}\" is not supported — only \"date_window\" is currently valid"
-        ));
+    // Validate iterator type (only relevant for legacy pipelines)
+    if let Some(iter) = &cfg.main_job.iterator {
+        if iter.iter_type != "date_window" {
+            errors.push(format!(
+                "[main_job.iterator] type \"{}\" is not supported — only \"date_window\" is currently valid",
+                iter.iter_type
+            ));
+        }
     }
 
-    // Validate all step lists
-    let all_steps = cfg.main_job.retry_steps.iter()
+    // Collect all leaf steps for validation.
+    // Wrapper steps (window_loop, retry, tx) are descended recursively.
+    // group references are also followed so steps inside [step_groups] are validated.
+    // Validate group names while collecting — unknown group = error.
+    fn collect_leaf_steps<'a>(
+        steps: &'a [MainStepConfig],
+        step_groups: &'a HashMap<String, StepGroupConfig>,
+        out: &mut Vec<&'a MainStepConfig>,
+        errors: &mut Vec<String>,
+    ) {
+        for s in steps {
+            match s.step_type.as_str() {
+                "window_loop" | "retry" | "tx" => {
+                    // Validate group reference if present
+                    if let Some(ref name) = s.group {
+                        if !s.steps.is_empty() {
+                            errors.push(format!(
+                                "step type \"{}\": cannot set both `group` and inline `steps` (group = {name})",
+                                s.step_type
+                            ));
+                        } else if let Some(grp) = step_groups.get(name.as_str()) {
+                            collect_leaf_steps(&grp.steps, step_groups, out, errors);
+                        } else {
+                            errors.push(format!(
+                                "step type \"{}\": group {name} not defined in [step_groups]",
+                                s.step_type
+                            ));
+                        }
+                    } else {
+                        collect_leaf_steps(&s.steps, step_groups, out, errors);
+                    }
+                }
+                _ => out.push(s),
+            }
+        }
+    }
+
+    let mut leaf_steps: Vec<&MainStepConfig> = Vec::new();
+    collect_leaf_steps(&cfg.main_job.steps, &cfg.step_groups, &mut leaf_steps, &mut errors);
+    // Also validate steps defined directly inside step_groups
+    for grp in cfg.step_groups.values() {
+        collect_leaf_steps(&grp.steps, &cfg.step_groups, &mut leaf_steps, &mut errors);
+    }
+    // Also walk legacy lists so existing pipelines still get validated
+    for s in cfg.main_job.retry_steps.iter()
         .chain(cfg.main_job.post_window_steps.iter())
-        .chain(cfg.main_job.post_loop_steps.iter());
+        .chain(cfg.main_job.post_loop_steps.iter())
+    {
+        leaf_steps.push(s);
+    }
+    let all_steps = leaf_steps.into_iter();
 
     for step in all_steps {
         let ctx = format!("step type=\"{}\"", step.step_type);
@@ -734,6 +849,7 @@ pub fn validate(cfg: &PipelineConfig, registry: &TypeRegistry) -> Result<()> {
             }
             other => errors.push(format!(
                 "Unknown step type \"{other}\" — valid types: \
+                 window_loop, retry, tx, \
                  fetch, transform, tx_upsert, send_to_queue, sleep, raw_sql, \
                  es_index, es_fetch, kafka_produce, kafka_consume, \
                  split_transform, merge_slots, slot_to_json, json_to_slot"
@@ -949,13 +1065,13 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
     };
 
     // ── Config map ────────────────────────────────────────────────────────
-    let iter = &cfg.main_job.iterator;
     let mut config = HashMap::new();
-    config.insert("iterator.start_interval".into(), iter.start_interval.resolve()?);
-    config.insert("iterator.end_interval".into(),   iter.end_interval.resolve()?);
-    config.insert("iterator.interval_limit".into(), iter.interval_limit.resolve()?);
-    config.insert("iterator.sleep_secs".into(),     iter.sleep_secs.resolve()?);
-
+    if let Some(iter) = &cfg.main_job.iterator {
+        config.insert("iterator.start_interval".into(), iter.start_interval.resolve()?);
+        config.insert("iterator.end_interval".into(),   iter.end_interval.resolve()?);
+        config.insert("iterator.interval_limit".into(), iter.interval_limit.resolve()?);
+        config.insert("iterator.sleep_secs".into(),     iter.sleep_secs.resolve()?);
+    }
     #[allow(unused_mut)]
     let mut ctx_inner = JobContext::new(connections, config, job_name);
 
@@ -1039,15 +1155,19 @@ pub async fn build_context(cfg: &PipelineConfig) -> Result<Arc<JobContext>> {
 }
 
 /// Build window config from parsed iterator + retry sections.
+/// Only used by callers that construct MainJobRunner directly (e.g. tests,
+/// external tooling). The composable pipeline path uses build_steps instead.
 pub fn build_window_cfg(cfg: &PipelineConfig) -> Result<WindowConfig> {
-    let iter = &cfg.main_job.iterator;
+    let iter = cfg.main_job.iterator.as_ref()
+        .ok_or_else(|| anyhow!("build_window_cfg: [main_job.iterator] is required"))?;
+    let retry = cfg.main_job.retry.as_ref().cloned().unwrap_or_default();
     Ok(WindowConfig {
         start_interval:    iter.start_interval.resolve_as::<i64>()?,
         end_interval:      iter.end_interval.resolve_as::<i64>()?,
         interval_limit:    iter.interval_limit.resolve_as::<i64>()?,
         sleep_secs:        iter.sleep_secs.resolve_as::<u64>()?,
-        max_attempts:      cfg.main_job.retry.max_attempts,
-        base_backoff_secs: cfg.main_job.retry.backoff_secs,
+        max_attempts:      retry.max_attempts,
+        base_backoff_secs: retry.backoff_secs,
     })
 }
 
@@ -1055,7 +1175,30 @@ pub fn build_window_cfg(cfg: &PipelineConfig) -> Result<WindowConfig> {
 pub fn build_steps(
     steps: &[MainStepConfig],
     registry: &Arc<TypeRegistry>,
+    step_groups: &HashMap<String, StepGroupConfig>,
 ) -> Result<StepRunner> {
+    // Resolve a wrapper step's child list from either inline `steps` or a
+    // named `group`.  Errors if both are set simultaneously.
+    fn resolve_child<'a>(
+        s: &'a MainStepConfig,
+        step_groups: &'a HashMap<String, StepGroupConfig>,
+    ) -> Result<&'a [MainStepConfig]> {
+        match (&s.group, s.steps.is_empty()) {
+            (Some(name), true) => step_groups
+                .get(name.as_str())
+                .map(|g| g.steps.as_slice())
+                .ok_or_else(|| anyhow!(
+                    "step type=\"{}\": group \"{name}\" not defined in [step_groups]",
+                    s.step_type
+                )),
+            (None, false)       => Ok(&s.steps),
+            (None, true)        => Ok(&[]),
+            (Some(name), false) => Err(anyhow!(
+                "step type=\"{}\": cannot set both group and inline steps (type: {name})",
+                s.step_type
+            )),
+        }
+    }
     let mut runner = StepRunner::new();
     for s in steps {
         let mut params = HashMap::new();
@@ -1064,6 +1207,57 @@ pub fn build_steps(
         if s.append { params.insert("append".into(), "true".into()); }
 
         match s.step_type.as_str() {
+            // ── Wrapper steps ─────────────────────────────────────────────
+            // Each wrapper builds a child StepRunner from s.steps, then
+            // wraps it in the appropriate orchestration struct.
+
+            "window_loop" => {
+                use crate::step::wrappers::WindowLoopStep;
+                let start = s.start_interval.as_ref()
+                    .ok_or_else(|| anyhow!("window_loop step missing `start_interval`"))?
+                    .resolve()?;
+                let end = s.end_interval.as_ref()
+                    .ok_or_else(|| anyhow!("window_loop step missing `end_interval`"))?
+                    .resolve()?;
+                let limit = s.interval_limit.as_ref()
+                    .ok_or_else(|| anyhow!("window_loop step missing `interval_limit`"))?
+                    .resolve()?;
+                let sleep = s.sleep_secs.as_ref()
+                    .map(|v| v.resolve())
+                    .transpose()?
+                    .unwrap_or_else(|| "0".into());
+                let child = build_steps(resolve_child(s, step_groups)?, registry, step_groups)?;
+                runner.push(WindowLoopStep {
+                    start_interval: start.parse().map_err(|_| anyhow!("window_loop: start_interval must be an integer"))?,
+                    end_interval:   end.parse().map_err(|_| anyhow!("window_loop: end_interval must be an integer"))?,
+                    interval_limit: limit.parse().map_err(|_| anyhow!("window_loop: interval_limit must be an integer"))?,
+                    sleep_secs:     sleep.parse().map_err(|_| anyhow!("window_loop: sleep_secs must be an integer"))?,
+                    child,
+                });
+            }
+
+            "retry" => {
+                use crate::step::wrappers::RetryStep;
+                let child = build_steps(resolve_child(s, step_groups)?, registry, step_groups)?;
+                runner.push(RetryStep {
+                    max_attempts:      s.max_attempts.unwrap_or(5),
+                    base_backoff_secs: s.backoff_secs.unwrap_or(2),
+                    child,
+                });
+            }
+
+            "tx" => {
+                #[cfg(feature = "postgres")]
+                {
+                    use crate::step::wrappers::TxStep;
+                    let child = build_steps(resolve_child(s, step_groups)?, registry, step_groups)?;
+                    runner.push(TxStep { child });
+                }
+                #[cfg(not(feature = "postgres"))]
+                return Err(anyhow!("tx step requires feature \"postgres\" — add it to Cargo.toml"));
+            }
+
+            // ── Leaf steps ────────────────────────────────────────────────
             "fetch" => {
                 let env = s.envelope.as_deref()
                     .ok_or_else(|| anyhow!("fetch step missing `envelope` field"))?;
@@ -1611,20 +1805,62 @@ async fn run_one_tick(
         }
     }
 
-    // Main job
-    let retry_steps    = build_steps(&cfg.main_job.retry_steps,       reg)?;
-    let post_window    = build_steps(&cfg.main_job.post_window_steps,  reg)?;
-    let post_loop      = build_steps(&cfg.main_job.post_loop_steps,    reg)?;
-    let window_cfg     = build_window_cfg(cfg)?;
+    // Main job — composable step model.
+    //
+    // New style: [[main_job.steps]] with wrapper types "window_loop", "retry", "tx".
+    // Old style (backward compat): main_job.iterator + main_job.retry + [[main_job.retry_steps]]
+    // are desugared here into an equivalent composable steps tree.
 
-    let mut runner = MainJobRunner {
-        window_cfg,
-        retry_steps,
-        post_window_steps: post_window,
-        post_loop_steps:   post_loop,
-    };
+    let main_steps: Vec<crate::pipeline_runner::MainStepConfig> =
+        if !cfg.main_job.steps.is_empty() {
+            // New composable style — use as-is.
+            cfg.main_job.steps.clone()
+        } else {
+            // Legacy style — build the equivalent tree:
+            //   window_loop { sleep, start, end, limit }
+            //     retry { max_attempts, backoff }
+            //       <retry_steps>
+            //     <post_window_steps>   (appended after retry, inside window_loop)
+            //   <post_loop_steps>       (appended after window_loop)
+            use crate::pipeline_runner::MainStepConfig;
 
-    let _summary = runner.run(ctx).await?;
+            let iter = cfg.main_job.iterator.as_ref()
+                .ok_or_else(|| anyhow!("main_job requires either [[main_job.steps]] or [main_job.iterator]"))?;
+            let retry = cfg.main_job.retry.as_ref().cloned()
+                .unwrap_or_default();
+
+            let retry_wrapper = MainStepConfig {
+                step_type:    "retry".into(),
+                max_attempts: Some(retry.max_attempts),
+                backoff_secs: Some(retry.backoff_secs),
+                steps:        cfg.main_job.retry_steps.clone(),
+                ..Default::default()
+            };
+
+            let mut window_children: Vec<MainStepConfig> = vec![retry_wrapper];
+            window_children.extend(cfg.main_job.post_window_steps.clone());
+
+            let window_loop = MainStepConfig {
+                step_type:      "window_loop".into(),
+                start_interval: Some(iter.start_interval.clone()),
+                end_interval:   Some(iter.end_interval.clone()),
+                interval_limit: Some(iter.interval_limit.clone()),
+                sleep_secs:     Some(iter.sleep_secs.clone()),
+                steps:          window_children,
+                ..Default::default()
+            };
+
+            let mut top: Vec<MainStepConfig> = vec![window_loop];
+            top.extend(cfg.main_job.post_loop_steps.clone());
+            top
+        };
+
+    let main_runner = build_steps(&main_steps, reg, &cfg.step_groups)?;
+
+    for step in &main_runner.steps {
+        step.run(ctx).await
+            .with_context(|| format!("main_job step \"{}\" failed", step.name()))?;
+    }
 
     // Post-job
     run_post_job(&cfg.post_job, ctx, reg).await?;

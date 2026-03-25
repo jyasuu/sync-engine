@@ -14,6 +14,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
+#[cfg(feature = "postgres")]
+use sqlx::{Postgres, Transaction};
+
 use crate::components::auth::OAuth2Auth;
 use crate::slot::{SlotMap, SlotScope};
 
@@ -100,6 +103,12 @@ pub struct JobContext {
     /// Job-level name (for logging).
     pub job_name: String,
 
+    // ── Active transaction ────────────────────────────────────────────────
+    // Held by TxStep while a transaction is open.  Child upsert steps
+    // borrow it via take_tx / put_tx rather than opening their own.
+    #[cfg(feature = "postgres")]
+    pub active_tx: Mutex<Option<Transaction<'static, Postgres>>>,
+
     // ── Optional backend clients ──────────────────────────────────────────
 
     /// Elasticsearch base URL — set when a [resources.*] type="elasticsearch" is defined.
@@ -129,6 +138,8 @@ impl JobContext {
             window:      RwLock::new(WindowMeta::default()),
             config,
             job_name:    job_name.into(),
+            #[cfg(feature = "postgres")]
+            active_tx: Mutex::new(None),
             #[cfg(feature = "elasticsearch")]
             es_url: None,
             #[cfg(feature = "kafka")]
@@ -237,5 +248,21 @@ impl JobContext {
 
     pub fn cfg_or<'a>(&'a self, key: &str, default: &'a str) -> &'a str {
         self.config.get(key).map(|s| s.as_str()).unwrap_or(default)
+    }
+
+    // ── Active transaction helpers ────────────────────────────────────────
+    // TxStep calls put_tx after BEGIN, take_tx before COMMIT/ROLLBACK.
+    // Child upsert steps call take_tx + put_tx to borrow-and-return.
+
+    #[cfg(feature = "postgres")]
+    pub async fn put_tx(&self, tx: Transaction<'static, Postgres>) {
+        *self.active_tx.lock().await = Some(tx);
+    }
+
+    /// Remove and return the active transaction, leaving the slot empty.
+    /// The caller is responsible for returning it via `put_tx` or committing.
+    #[cfg(feature = "postgres")]
+    pub async fn take_tx(&self) -> Option<Transaction<'static, Postgres>> {
+        self.active_tx.lock().await.take()
     }
 }

@@ -8,6 +8,7 @@ pub mod queue_send;
 pub mod setup;
 pub mod sink;
 pub mod transform;
+pub mod wrappers;
 
 // ── New backend steps ─────────────────────────────────────────────────────
 #[cfg(feature = "postgres")]

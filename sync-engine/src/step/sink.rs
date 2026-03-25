@@ -48,7 +48,15 @@ where
             return Ok(());
         }
 
-        let mut tx       = ctx.connections.db.begin().await.context("begin tx")?;
+        // If a parent TxStep placed an active transaction, borrow it.
+        // Otherwise open a self-contained transaction (legacy / standalone use).
+        let borrowed = ctx.take_tx().await;
+        let standalone = borrowed.is_none();
+        let mut tx = match borrowed {
+            Some(t) => t,
+            None    => ctx.connections.db.begin().await.context("begin tx")?,
+        };
+
         let mut upserted = 0usize;
         let mut skipped  = 0usize;
 
@@ -62,8 +70,16 @@ where
             }
         }
 
-        tx.commit().await.context("commit tx")?;
-        info!(upserted, skipped, slot = %self.reads, "Tx committed");
+        if standalone {
+            // No parent TxStep — commit immediately.
+            tx.commit().await.context("commit tx")?;
+            info!(upserted, skipped, slot = %self.reads, "Tx committed (standalone)");
+        } else {
+            // Return the transaction to the context so TxStep can commit
+            // after all sibling steps have completed.
+            ctx.put_tx(tx).await;
+            info!(upserted, skipped, slot = %self.reads, "Upsert done (tx borrowed)");
+        }
 
         ctx.slot_write("window.upserted", upserted).await?;
         ctx.slot_write("window.skipped",  skipped).await?;
