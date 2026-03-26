@@ -242,7 +242,7 @@ HTTP 401 received   → invalidate(), next retry fetches fresh token
 | **What** | Compile-time code generator — reads `schema.toml`, emits Rust source into `OUT_DIR` |
 | **Why** | Domain structs and SQL are declarations, not hand-written code; changing the API contract requires only editing `schema.toml` |
 | **When** | Runs before the Rust compiler every time `schema.toml` or `config.toml` changes |
-| **Who** | `user-sync/build.rs` calls `sync_engine::codegen::generate()` and `generate_config_doc()` |
+| **Who** | `user-sync/build.rs` calls `sync_engine::codegen::generate()`  |
 | **Where** | `sync-engine/src/codegen.rs` (the generator), `user-sync/build.rs` (the entry point) |
 | **How to extend** | Add a new rule keyword: (1) add a `match` arm in `gen_rule_expr`, (2) add a helper in `generated/rules.rs` |
 

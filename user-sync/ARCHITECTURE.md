@@ -9,7 +9,7 @@
 | Phase | Steps |
 |-------|-------|
 | pre\_job | build resources (postgres pool, oauth2, http client) · declare slots/queues |
-| main\_job | date\_window iterator → retry → fetch → transform → tx_upsert |
+| main\_job | composable step tree — see ARCHITECTURE.svg for the actual nesting |
 | post\_job | log\_summary · raw\_sql · drain\_queue · custom hook |
 | scheduler | cron `0 */30 * * * *` · mutex-skip · pipeline-scope slots survive ticks |
 
