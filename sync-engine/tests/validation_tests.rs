@@ -34,19 +34,21 @@ fn minimal_cfg(retry_steps: Vec<MainStepConfig>) -> PipelineConfig {
         queues:  HashMap::new(),
         pre_job: PreJobConfig { init_resources: true, steps: vec![] },
         main_job: MainJobConfig {
-            iterator: IteratorConfig {
+            iterator: Some(IteratorConfig {
                 iter_type:      "date_window".into(),
                 start_interval: ConfigValue::Literal("30".into()),
                 end_interval:   ConfigValue::Literal("0".into()),
                 interval_limit: ConfigValue::Literal("7".into()),
                 sleep_secs:     ConfigValue::Literal("60".into()),
-            },
-            retry: RetryConfig { max_attempts: 3, backoff_secs: 1 },
+            }),
+            retry: Some(RetryConfig { max_attempts: 3, backoff_secs: 1 }),
+            steps:             vec![],
             retry_steps,
             post_window_steps: vec![],
             post_loop_steps:   vec![],
         },
         post_job: PostJobConfig { steps: vec![PostStepConfig::LogSummary] },
+        step_groups: HashMap::new(),
     }
 }
 
@@ -88,6 +90,15 @@ fn step(type_: &str) -> MainStepConfig {
         timeout_ms:      None,
         transforms:      vec![],
         merge_reads:     vec![],
+        // wrapper fields
+        steps:          vec![],
+        start_interval: None,
+        end_interval:   None,
+        interval_limit: None,
+        sleep_secs:     None,
+        max_attempts:   None,
+        backoff_secs:   None,
+        group:          None,
     }
 }
 

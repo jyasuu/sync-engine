@@ -728,7 +728,6 @@ pub fn generate_architecture_svg(
         .map(|v| v.get("queues").is_some())
         .unwrap_or(false);
 
-    let sink_label    = if has_queue { "send_to_queue" } else { "tx_upsert" };
     let pattern_label = if has_queue { "case 3/4 — async queue" } else { "case 1 — tx per window" };
 
     // svg_ref_path is written as a relative path in the img tag.
@@ -747,7 +746,7 @@ pub fn generate_architecture_svg(
          | Phase | Steps |\n\
          |-------|-------|\n\
          | pre\\_job | build resources (postgres pool, oauth2, http client) · declare slots/queues |\n\
-         | main\\_job | date\\_window iterator → retry → fetch → transform → {sink_label} |\n\
+         | main\\_job | composable step tree — see ARCHITECTURE.svg for the actual nesting |\n\
          | post\\_job | log\\_summary · raw\\_sql · drain\\_queue · custom hook |\n\
          | scheduler | cron `{cron}` · mutex-skip · pipeline-scope slots survive ticks |\n\
          \n\
@@ -767,6 +766,158 @@ pub fn generate_architecture_svg(
 }
 
 // ── Private helper ────────────────────────────────────────────────────────
+
+// Step representation used only for SVG rendering.
+#[derive(Clone)]
+struct SvgStep {
+    label:      String,
+    sub:        String,
+    is_wrapper: bool,
+    children:   Vec<SvgStep>,
+}
+
+const LEAF_H:   i32 = 28;
+const WRAP_HDR: i32 = 22;
+const WRAP_PAD: i32 = 8;
+const STEP_GAP: i32 = 4;
+const INDENT:   i32 = 16;
+
+fn svg_step_height(s: &SvgStep) -> i32 {
+    if !s.is_wrapper || s.children.is_empty() { return LEAF_H; }
+    let ch: i32 = s.children.iter().map(svg_step_height).sum::<i32>()
+        + STEP_GAP * (s.children.len() as i32 - 1).max(0);
+    WRAP_HDR + WRAP_PAD + ch + WRAP_PAD
+}
+
+fn svg_steps_total_height(steps: &[SvgStep]) -> i32 {
+    if steps.is_empty() { return 0; }
+    steps.iter().map(svg_step_height).sum::<i32>()
+        + STEP_GAP * (steps.len() as i32 - 1).max(0)
+}
+
+fn svg_step_colors(label: &str, is_wrapper: bool) -> (&'static str, &'static str) {
+    if label.starts_with("window_loop") { return ("hdr",  "ht");  }
+    if label.starts_with("retry")       { return ("hdr",  "ht");  }
+    if label.starts_with("tx ")         { return ("hdr3", "ht3"); }
+    if label == "tx_upsert"             { return ("hdr2", "ht2"); }
+    if label == "transform"             { return ("hdr4", "ht4"); }
+    if label == "fetch"                 { return ("hdr",  "ht");  }
+    if label == "sleep"                 { return ("hdr5", "ht5"); }
+    if is_wrapper                       { return ("hdr",  "ht");  }
+    ("hdr5", "ht5")
+}
+
+fn svg_step_subtitle(v: &toml::Value) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for key in &["envelope","transform","model","group","reads","writes","secs","max_attempts"] {
+        if let Some(val) = v.get(key) {
+            let s = match val {
+                toml::Value::String(s)  => s.clone(),
+                toml::Value::Integer(n) => n.to_string(),
+                toml::Value::Table(t)   => t.get("default")
+                    .and_then(|d| d.as_str()).unwrap_or("…").to_owned(),
+                _ => continue,
+            };
+            parts.push(format!("{key}={s}"));
+            if parts.len() >= 2 { break; }
+        }
+    }
+    parts.join("  ")
+}
+
+fn resolve_svg_step(
+    v:      &toml::Value,
+    groups: &HashMap<String, toml::Value>,
+    depth:  usize,
+) -> SvgStep {
+    if depth > 8 {
+        return SvgStep { label: "…".into(), sub: "".into(), is_wrapper: false, children: vec![] };
+    }
+    let type_str   = v.get("type").and_then(|t| t.as_str()).unwrap_or("step");
+    let is_wrapper = matches!(type_str, "window_loop" | "retry" | "tx");
+
+    let children = if is_wrapper {
+        let inline: Vec<SvgStep> = v.get("steps")
+            .and_then(|s| s.as_array())
+            .map(|arr| arr.iter().map(|c| resolve_svg_step(c, groups, depth + 1)).collect())
+            .unwrap_or_default();
+        if !inline.is_empty() {
+            inline
+        } else if let Some(gname) = v.get("group").and_then(|g| g.as_str()) {
+            groups.get(gname)
+                .and_then(|grp| grp.get("steps")?.as_array())
+                .map(|arr| arr.iter().map(|c| resolve_svg_step(c, groups, depth + 1)).collect())
+                .unwrap_or_default()
+        } else { vec![] }
+    } else { vec![] };
+
+    let label = match type_str {
+        "window_loop" => {
+            let limit = v.get("interval_limit")
+                .and_then(|x| x.as_integer()
+                    .or_else(|| x.get("default")?.as_str()?.parse().ok()))
+                .unwrap_or(7);
+            format!("window_loop  (limit={limit}d)")
+        }
+        "retry" => {
+            let n = v.get("max_attempts").and_then(|x| x.as_integer()).unwrap_or(5);
+            format!("retry  (max={n})")
+        }
+        "tx"    => "tx  (postgres transaction)".into(),
+        other   => other.to_owned(),
+    };
+
+    let sub = if !is_wrapper {
+        v.get("group").and_then(|g| g.as_str())
+            .map(|g| format!("group:{g}"))
+            .unwrap_or_else(|| svg_step_subtitle(v))
+    } else {
+        svg_step_subtitle(v)
+    };
+
+    SvgStep { label, sub, is_wrapper, children }
+}
+
+fn render_steps_svg(steps: &[SvgStep], x: i32, y: i32, avail_w: i32, out: &mut String) {
+    let mut cy = y;
+    for (i, s) in steps.iter().enumerate() {
+        let h = svg_step_height(s);
+        let (hdr, tc) = svg_step_colors(&s.label, s.is_wrapper);
+
+        if s.is_wrapper && !s.children.is_empty() {
+            out.push_str(&format!(
+                "<rect x=\"{x}\" y=\"{cy}\" width=\"{avail_w}\" height=\"{h}\" rx=\"5\" class=\"box\"/>\n\
+                 <rect x=\"{x}\" y=\"{cy}\" width=\"{avail_w}\" height=\"{WRAP_HDR}\" rx=\"5\" class=\"{hdr}\"/>\n\
+                 <rect x=\"{x}\" y=\"{}\" width=\"{avail_w}\" height=\"6\" class=\"{hdr}\"/>\n\
+                 <text x=\"{}\" y=\"{}\" class=\"{tc}\" font-size=\"12\">{}</text>\n",
+                cy + WRAP_HDR - 6,
+                x + 8, cy + WRAP_HDR - 6,
+                s.label
+            ));
+            if !s.sub.is_empty() {
+                out.push_str(&format!(
+                    "<text x=\"{}\" y=\"{}\" class=\"dim\" font-size=\"10\" text-anchor=\"end\">{}</text>\n",
+                    x + avail_w - 8, cy + WRAP_HDR - 6, s.sub
+                ));
+            }
+            render_steps_svg(&s.children, x + INDENT, cy + WRAP_HDR + WRAP_PAD, avail_w - INDENT * 2, out);
+        } else {
+            out.push_str(&format!(
+                "<rect x=\"{x}\" y=\"{cy}\" width=\"{avail_w}\" height=\"{h}\" rx=\"4\" class=\"{hdr}\"/>\n\
+                 <text x=\"{}\" y=\"{}\" class=\"{tc}\" font-size=\"12\">{}</text>\n",
+                x + 8, cy + 18, s.label
+            ));
+            if !s.sub.is_empty() {
+                out.push_str(&format!(
+                    "<text x=\"{}\" y=\"{}\" class=\"dim\" font-size=\"10\" text-anchor=\"end\">{}</text>\n",
+                    x + avail_w - 8, cy + 18, s.sub
+                ));
+            }
+        }
+        cy += h;
+        if i + 1 < steps.len() { cy += STEP_GAP; }
+    }
+}
 
 /// Parse schema + pipeline and return the SVG string.
 /// All layout and rendering lives here; the public functions just decide
@@ -907,7 +1058,25 @@ fn build_svg(schema_path: &Path, pipeline_path: &Path) -> String {
     let mut svg = String::new();
 
     let init_h = if has_init_job { 80i32 + 26 * init_job_steps.len() as i32 } else { 0i32 };
-    let total_h = 80 + 60 + schema_h + 40 + 280 + 40 + init_h + 160 + 40 + 80;
+
+    // Pre-compute pipe_h from the actual step tree so total_h is accurate.
+    let pre_pipe_h: i32 = {
+        let grps: HashMap<String, toml::Value> = pipeline_val.as_ref()
+            .and_then(|v| v.get("step_groups")?.as_table())
+            .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        let steps_val: Vec<SvgStep> = pipeline_val.as_ref()
+            .and_then(|v| v.get("main_job")?.get("steps")?.as_array())
+            .filter(|arr| !arr.is_empty())
+            .map(|arr| arr.iter().map(|s| resolve_svg_step(s, &grps, 0)).collect())
+            .unwrap_or_else(|| vec![SvgStep {
+                label: String::new(), sub: String::new(),
+                is_wrapper: false, children: vec![],
+            }; 5]);
+        svg_steps_total_height(&steps_val) + 40
+    };
+
+    let total_h = 80 + 60 + schema_h + 40 + pre_pipe_h + 40 + init_h + 160 + 40 + 80;
     svg.push_str(&format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{total_h}\" \
          viewBox=\"0 0 {w} {total_h}\" \
@@ -1057,59 +1226,42 @@ fn build_svg(schema_path: &Path, pipeline_path: &Path) -> String {
         }
     }
 
-    // ── Pipeline section ──────────────────────────────────────────────────
-    let py     = iy + init_section_h + if has_init_job { 14i32 } else { 0i32 };
-    let pipe_h = 280i32;
+    // ── Pipeline section — dynamic composable step tree ───────────────────
+
+    // Collect steps for rendering: new-style (main_job.steps) or legacy flat list.
+    let groups_val: HashMap<String, toml::Value> = pipeline_val.as_ref()
+        .and_then(|v| v.get("step_groups"))
+        .and_then(|g| g.as_table())
+        .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+
+    let svg_steps: Vec<SvgStep> = pipeline_val.as_ref()
+        .and_then(|v| v.get("main_job")?.get("steps")?.as_array())
+        .filter(|arr| !arr.is_empty())
+        .map(|arr| arr.iter().map(|s| resolve_svg_step(s, &groups_val, 0)).collect())
+        .unwrap_or_else(|| vec![
+            SvgStep { label: "pre_job".into(),  sub: "resources".into(),        is_wrapper: false, children: vec![] },
+            SvgStep { label: "fetch".into(),     sub: format!("→ {api_name}"),   is_wrapper: false, children: vec![] },
+            SvgStep { label: "transform".into(), sub: format!("→ {db_name}"),    is_wrapper: false, children: vec![] },
+            SvgStep { label: sink_label.into(),  sub: format!("→ {table_name}"), is_wrapper: false, children: vec![] },
+            SvgStep { label: "post_job".into(),  sub: "summary + hooks".into(),  is_wrapper: false, children: vec![] },
+        ]);
+
+    let steps_content_h = svg_steps_total_height(&svg_steps);
+    let pipe_h = steps_content_h + 40i32;
+
+    let py = iy + init_section_h + if has_init_job { 14i32 } else { 0i32 };
     svg.push_str(&format!(
         "<rect x=\"20\" y=\"{py}\" width=\"{}\" height=\"{pipe_h}\" rx=\"10\" class=\"box\"/>\n\
          <text x=\"40\" y=\"{}\" class=\"dim\">pipeline.toml  ·  main_job</text>\n",
         w - 40, py + 18
     ));
 
-    let steps: &[(&str, &str, &str)] = &[
-        ("pre_job",     "resources",             "hdr"),
-        ("fetch",       &format!("→ {api_name}"), "hdr"),
-        ("transform",   &format!("→ {db_name}"),  "hdr4"),
-        (sink_label,    &format!("→ {table_name}"),"hdr2"),
-        ("post_job",    "summary + hooks",         "hdr3"),
-    ];
-    let step_w = (w - 80 - (steps.len() as i32 - 1) * 16) / steps.len() as i32;
-    let step_y = py + 34i32;
-    let step_h = 56i32;
+    let mut pipe_svg = String::new();
+    render_steps_svg(&svg_steps, 40, py + 26, w - 80, &mut pipe_svg);
+    svg.push_str(&pipe_svg);
 
-    for (i, (label, sub, hdr)) in steps.iter().enumerate() {
-        let sx2 = 40 + i as i32 * (step_w + 16);
-        let tc = match *hdr { "hdr" => "ht", "hdr2" => "ht2", "hdr3" => "ht3", "hdr4" => "ht4", _ => "ht5" };
-        svg.push_str(&format!(
-            "<rect x=\"{sx2}\" y=\"{step_y}\" width=\"{step_w}\" height=\"{step_h}\" rx=\"6\" class=\"box\"/>\n\
-             <rect x=\"{sx2}\" y=\"{step_y}\" width=\"{step_w}\" height=\"28\" rx=\"6\" class=\"{hdr}\"/>\n\
-             <rect x=\"{sx2}\" y=\"{}\" width=\"{step_w}\" height=\"14\" class=\"{hdr}\"/>\n\
-             <text x=\"{}\" y=\"{}\" class=\"{tc}\" text-anchor=\"middle\">{label}</text>\n\
-             <text x=\"{}\" y=\"{}\" class=\"dim\" text-anchor=\"middle\">{sub}</text>\n",
-            step_y + 14,
-            sx2 + step_w / 2, step_y + 18,
-            sx2 + step_w / 2, step_y + 44
-        ));
-        if i + 1 < steps.len() {
-            let ax = sx2 + step_w;
-            let ay = step_y + step_h / 2;
-            svg.push_str(&format!(
-                "<line x1=\"{ax}\" y1=\"{ay}\" x2=\"{}\" y2=\"{ay}\" class=\"arr2\"/>\n",
-                ax + 14
-            ));
-        }
-    }
-
-    let ann_y = step_y + step_h + 16i32;
-    svg.push_str(&format!(
-        "<rect x=\"40\" y=\"{ann_y}\" width=\"{}\" height=\"22\" rx=\"4\" class=\"dash\"/>\n\
-         <text x=\"{}\" y=\"{}\" class=\"dim\" text-anchor=\"middle\">\
-         date_window iterator  ·  retry(max=5, backoff=2s)  ·  sleep between windows\
-         </text>\n",
-        w - 80, w / 2, ann_y + 14
-    ));
-
-    let slot_y = ann_y + 36i32;
+    let slot_y = py + pipe_h + 8i32;
     svg.push_str(&format!("<text x=\"40\" y=\"{slot_y}\" class=\"dim\">data flow:</text>\n"));
 
     let flow_items: &[(&str, &str)] = &[
