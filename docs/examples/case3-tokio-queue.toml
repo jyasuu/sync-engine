@@ -16,6 +16,8 @@
 #   [[pre_job.steps]]    spawn_consumer added
 #   retry tx_upsert      replaced with send_to_queue
 #   [[post_job.steps]]   drain_queue added before log_summary
+#
+# Composable version: case3-composable.toml
 
 [job]
 name = "user-sync"

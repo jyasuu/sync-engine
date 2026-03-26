@@ -14,6 +14,8 @@
 # Changed from case 3:
 #   [queues.db_rows]   type = "rabbitmq" + url/exchange/routing_key
 #   Everything else is identical to case 3.
+#
+# Composable version: case4-composable.toml
 
 [job]
 name = "user-sync"

@@ -1,0 +1,108 @@
+# case12-composable.toml
+#
+# Same pattern as case12-split-transform.toml (fan-out to multiple DB tables)
+# rewritten in the composable step_groups style.
+#
+# split_transform is a leaf step — it does not nest children — so the main
+# benefit of step_groups here is naming and grouping the two separate tx
+# upsert paths clearly.
+#
+# main.rs:
+#   registry.register_envelope::<ApiUserResponse>("ApiUserResponse");
+#   registry.register_transform::<ApiUser, DbUser, UserTransform>("UserTransform");
+#   registry.register_transform::<ApiUser, DbUserRole, UserRoleTransform>("UserRoleTransform");
+#   registry.register_model::<DbUser>("DbUser");
+#   registry.register_model::<DbUserRole>("DbUserRole");
+#   sync_engine::run("pipeline.toml", registry).await
+
+[job]
+name = "user-sync"
+
+[job.trigger]
+type = "cron"
+cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
+
+[resources.pg]
+type            = "postgres"
+url             = { env = "SINK__DATABASE_URL" }
+max_connections = 5
+
+[resources.auth]
+type          = "oauth2"
+token_url     = { env = "AUTH__TOKEN_URL" }
+client_id     = { env = "AUTH__CLIENT_ID" }
+client_secret = { env = "AUTH__CLIENT_SECRET" }
+
+[resources.http]
+type           = "http_client"
+timeout_secs   = 620
+keepalive_secs = 30
+
+[resources.svc]
+type       = "http_service"
+http       = "http"
+auth       = "auth"
+endpoint   = { env = "SOURCE__USER_ENDPOINT" }
+realm_type = { env = "SOURCE__INCLUDE_REALM_TYPES", default = "" }
+
+[slots.api_rows]
+type  = "ApiUser"
+scope = "window"
+
+[slots.db_users]
+type  = "DbUser"
+scope = "window"
+
+[slots.db_roles]
+type  = "DbUserRole"
+scope = "window"
+
+[pre_job]
+init_resources = true
+
+# ── Step groups ───────────────────────────────────────────────────────────
+#
+# The fan-out and two commits are separated into named groups.
+# commit_both groups them back together under a single tx wrapper so both
+# tables land in the same Postgres transaction.
+
+[step_groups.commit_both]
+steps = [
+  { type = "tx_upsert", model = "DbUser",     reads = "db_users" },
+  { type = "tx_upsert", model = "DbUserRole", reads = "db_roles" },
+]
+
+[step_groups.fetch_split_commit]
+steps = [
+  { type = "fetch", envelope = "ApiUserResponse", writes = "api_rows" },
+  { type = "split_transform",
+    reads      = "api_rows",
+    transforms = [
+      { transform = "UserTransform",     writes = "db_users" },
+      { transform = "UserRoleTransform", writes = "db_roles" },
+    ]
+  },
+  { type = "tx", group = "commit_both" },
+]
+
+# ── Main job ──────────────────────────────────────────────────────────────
+
+[[main_job.steps]]
+type           = "window_loop"
+start_interval = { env = "SOURCE__START_INTERVAL",    default = "30" }
+end_interval   = { env = "SOURCE__END_INTERVAL",      default = "0"  }
+interval_limit = { env = "SOURCE__INTERVAL_LIMIT",    default = "7"  }
+steps = [
+  { type = "retry", max_attempts = 5, backoff_secs = 2, group = "fetch_split_commit" },
+  { type = "sleep", secs = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" } },
+]
+
+# ── Post-job ──────────────────────────────────────────────────────────────
+
+[[post_job.steps]]
+type = "log_summary"
+
+[[post_job.steps]]
+type          = "raw_sql"
+sql           = { env = "SINK__SYNC_SQL", default = "" }
+skip_if_empty = true

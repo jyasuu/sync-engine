@@ -9,6 +9,8 @@
 #   registry.register_transform::<ApiUser, DbUser, UserTransform>("UserTransform");
 #   registry.register_model::<DbUser>("DbUser");
 #   sync_engine::run("pipeline.toml", registry).await
+#
+# Composable version: case1-composable.toml
 
 [job]
 name = "user-sync"

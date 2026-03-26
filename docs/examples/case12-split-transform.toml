@@ -18,6 +18,8 @@
 #   registry.register_model::<DbUser>("DbUser");
 #   registry.register_model::<DbUserRole>("DbUserRole");
 #   sync_engine::run("pipeline.toml", registry).await
+#
+# Composable version: case12-composable.toml
 
 [job]
 name = "user-sync"

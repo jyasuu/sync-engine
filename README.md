@@ -75,6 +75,21 @@ All four patterns share the same `main.rs`. Switch between them by editing
 | Sink | tx per window | bulk tx after loop | tokio consumer | amqp consumer |
 | Best for | simplicity | fewer commits | throughput | multi-service |
 
+Each case has two example files in `docs/examples/`:
+
+| File | Style |
+|------|-------|
+| `case1-tx-per-window.toml` | Legacy flat (`retry_steps` / `iterator`) |
+| `case1-composable.toml` | Composable (`step_groups` / `window_loop`) |
+| `case2-bulk-tx.toml` | Legacy flat |
+| `case2-composable.toml` | Composable |
+| `case3-tokio-queue.toml` | Legacy flat |
+| `case3-composable.toml` | Composable |
+| `case4-rabbitmq.toml` | Legacy flat |
+| `case4-composable.toml` | Composable (only `[queues.db_rows]` differs from case 3) |
+| `case12-split-transform.toml` | Legacy flat (fan-out to multiple tables) |
+| `case12-composable.toml` | Composable — `tx` wraps both upserts in one transaction |
+
 See `docs/pipeline-patterns.md` for full annotated examples of each case.
 
 **Minimal diff between cases** — the only lines that change:
@@ -101,33 +116,38 @@ routing_key = { env = "RABBITMQ_ROUTING_KEY" }
 
 ## `pipeline.toml` structure
 
+There are two styles for writing `main_job`. Both compile to the same runtime
+step tree — the legacy style is accepted unchanged; the composable style is
+recommended for new pipelines.
+
+### Legacy flat style
+
 ```toml
 [job]
 name = "my-sync"
 
-[job.scheduler]
+[job.trigger]
+type = "cron"
 cron = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
 
-# ── Named connections — built in dependency order ──────────────────────────
 [resources.pg]    type = "postgres"     url  = { env = "SINK__DATABASE_URL" }
 [resources.auth]  type = "oauth2"       ...
 [resources.http]  type = "http_client"  timeout_secs = 620
 [resources.svc]   type = "http_service" http = "http"  auth = "auth"
                                         endpoint = { env = "SOURCE__ENDPOINT" }
 
-# ── Typed data channels ────────────────────────────────────────────────────
-[slots.api_rows]  type = "ApiUser"   scope = "window"  # or "job" / "pipeline"
-[slots.db_rows]   type = "DbUser"    scope = "window"
-# [queues.db_rows]  type = "tokio"   capacity = 256
-# [queues.db_rows]  type = "rabbitmq"  url = ...  exchange = ...
+[slots.api_rows]  type = "ApiUser"  scope = "window"
+[slots.db_rows]   type = "DbUser"   scope = "window"
 
-# ── Phases ─────────────────────────────────────────────────────────────────
 [pre_job]
 init_resources = true
-# [[pre_job.steps]]  type = "spawn_consumer"  model = "DbUser"  queue = "db_rows"
 
 [main_job.iterator]
-type = "date_window"  start_interval = ...  end_interval = ...
+type           = "date_window"
+start_interval = { env = "SOURCE__START_INTERVAL", default = "30" }
+end_interval   = { env = "SOURCE__END_INTERVAL",   default = "0"  }
+interval_limit = { env = "SOURCE__INTERVAL_LIMIT", default = "7"  }
+sleep_secs     = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
 
 [main_job.retry]
 max_attempts = 5  backoff_secs = 2
@@ -140,7 +160,6 @@ type = "transform"  transform = "UserTransform"   reads = "api_rows"  writes = "
 
 [[main_job.retry_steps]]
 type = "tx_upsert"  model = "DbUser"  reads = "db_rows"
-# type = "send_to_queue"  model = "DbUser"  reads = "db_rows"  queue = "db_rows"
 
 [[main_job.post_window_steps]]
 type = "sleep"  secs = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
@@ -148,6 +167,95 @@ type = "sleep"  secs = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" }
 [[post_job.steps]]  type = "log_summary"
 [[post_job.steps]]  type = "raw_sql"  sql = { env = "SINK__SYNC_SQL", default = "" }  skip_if_empty = true
 ```
+
+### Composable style (recommended)
+
+```toml
+[step_groups.commit_users]
+steps = [
+  { type = "tx_upsert", model = "DbUser", reads = "db_rows" },
+]
+
+[step_groups.fetch_and_transform]
+steps = [
+  { type = "fetch",     envelope = "ApiUserResponse", writes = "api_rows" },
+  { type = "transform", transform = "UserTransform",  reads  = "api_rows", writes = "db_rows" },
+  { type = "tx", group = "commit_users" },
+]
+
+[[main_job.steps]]
+type           = "window_loop"
+start_interval = { env = "SOURCE__START_INTERVAL", default = "30" }
+end_interval   = { env = "SOURCE__END_INTERVAL",   default = "0"  }
+interval_limit = { env = "SOURCE__INTERVAL_LIMIT", default = "7"  }
+steps = [
+  { type = "retry", max_attempts = 5, group = "fetch_and_transform" },
+  { type = "sleep", secs = { env = "SOURCE__WINDOW_SLEEP_SECS", default = "60" } },
+]
+
+[[post_job.steps]]  type = "log_summary"
+```
+
+---
+
+## Composable step model
+
+`window_loop`, `retry`, and `tx` are first-class steps — not hardwired engine
+phases. They can appear any number of times, at any nesting depth, in any
+order. The pipeline shape is expressed in TOML; no Rust changes are needed.
+
+### Wrapper steps
+
+| Type | What it does |
+|------|-------------|
+| `window_loop` | Iterates date windows; runs child steps for each window |
+| `retry` | Re-runs child steps on failure with exponential back-off |
+| `tx` | Opens a Postgres transaction; commits after all children succeed |
+
+Child steps are given either inline (`steps = [...]`) or by name (`group = "…"`).
+The two forms cannot be combined on the same wrapper.
+
+### Step groups
+
+`[step_groups.*]` defines named, reusable step sequences. Groups can reference
+other groups — `tx` inside `fetch_and_transform` references `commit_users`:
+
+```toml
+[step_groups.commit_users]
+steps = [
+  { type = "tx_upsert", model = "DbUser", reads = "db_rows" },
+]
+
+[step_groups.fetch_and_transform]
+steps = [
+  { type = "fetch",     envelope = "ApiUserResponse", writes = "api_rows" },
+  { type = "transform", transform = "UserTransform",  reads  = "api_rows", writes = "db_rows" },
+  { type = "tx", group = "commit_users" },
+]
+```
+
+### Multiple wrappers in one pipeline
+
+The same wrapper type can appear multiple times with different configurations:
+
+```toml
+[[main_job.steps]]
+type           = "window_loop"
+start_interval = { env = "SOURCE__START_INTERVAL", default = "30" }
+end_interval   = 0
+interval_limit = 7
+steps = [
+  { type = "retry", max_attempts = 3,  backoff_secs = 1, group = "fetch_users" },
+  { type = "retry", max_attempts = 10, backoff_secs = 5, group = "write_audit" },
+  { type = "sleep", secs = 60 },
+]
+```
+
+### ARCHITECTURE.svg
+
+The generated `ARCHITECTURE.svg` reflects the actual step tree from
+`pipeline.toml` — wrapper steps render as labelled container boxes with
+children nested inside. The diagram stays in sync with the config automatically.
 
 ### Config value syntax
 
@@ -161,7 +269,6 @@ cron         = { env = "SCHEDULER__CRON", default = "0 */30 * * * *" }
 
 `pipeline.toml` is the single source of truth for every config knob. The env
 key names are the documentation.
-
 ---
 
 ## `schema.toml` structure

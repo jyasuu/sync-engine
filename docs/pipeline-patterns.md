@@ -3,6 +3,62 @@
 > This document shows how the same sync job can be expressed in four
 > progressively more sophisticated patterns — all by changing `pipeline.toml`
 > only. The Rust `main.rs` stays identical across every case.
+>
+> Each case has two example files: a legacy flat version (`case*-*.toml`) and
+> a composable version (`case*-composable.toml`). Both compile to the same
+> runtime behaviour. The composable versions are recommended for new pipelines.
+
+---
+
+## Step style comparison
+
+The same case 1 pipeline expressed in both styles:
+
+**Legacy flat** — uses `[main_job.iterator]`, `[main_job.retry]`, and
+`[[main_job.retry_steps]]` as separate fixed sections:
+
+```toml
+[main_job.iterator]
+type = "date_window"  start_interval = ...
+
+[main_job.retry]
+max_attempts = 5
+
+[[main_job.retry_steps]]
+type = "fetch"  ...
+
+[[main_job.retry_steps]]
+type = "tx_upsert"  ...
+```
+
+**Composable** — uses named `[step_groups]` and `[[main_job.steps]]` with
+wrapper step types (`window_loop`, `retry`, `tx`):
+
+```toml
+[step_groups.commit_users]
+steps = [{ type = "tx_upsert", model = "DbUser", reads = "db_rows" }]
+
+[step_groups.fetch_and_transform]
+steps = [
+  { type = "fetch",     envelope = "ApiUserResponse", writes = "api_rows" },
+  { type = "transform", transform = "UserTransform",  reads  = "api_rows", writes = "db_rows" },
+  { type = "tx", group = "commit_users" },
+]
+
+[[main_job.steps]]
+type           = "window_loop"
+start_interval = { env = "SOURCE__START_INTERVAL", default = "30" }
+end_interval   = 0
+interval_limit = 7
+steps = [
+  { type = "retry", max_attempts = 5, group = "fetch_and_transform" },
+  { type = "sleep", secs = 60 },
+]
+```
+
+The composable style makes the nesting explicit and visible. `ARCHITECTURE.svg`
+renders the actual step tree — wrappers appear as container boxes with children
+nested inside.
 
 ---
 
@@ -171,6 +227,8 @@ sql           = { env = "SINK__SYNC_SQL", default = "" }
 skip_if_empty = true
 ```
 
+> **Composable version:** `docs/examples/case1-composable.toml`
+
 ---
 
 ## Case 2 — accumulate all windows, then one bulk transaction
@@ -295,6 +353,8 @@ type          = "raw_sql"
 sql           = { env = "SINK__SYNC_SQL", default = "" }
 skip_if_empty = true
 ```
+
+> **Composable version:** `docs/examples/case2-composable.toml`
 
 ---
 
@@ -433,6 +493,8 @@ sql           = { env = "SINK__SYNC_SQL", default = "" }
 skip_if_empty = true
 ```
 
+> **Composable version:** `docs/examples/case3-composable.toml`
+
 ---
 
 ## Case 4 — async producer / consumer (RabbitMQ)
@@ -558,6 +620,8 @@ type          = "raw_sql"
 sql           = { env = "SINK__SYNC_SQL", default = "" }
 skip_if_empty = true
 ```
+
+> **Composable version:** `docs/examples/case4-composable.toml`
 
 ---
 
